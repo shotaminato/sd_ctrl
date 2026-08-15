@@ -1,0 +1,14 @@
+packages:
+  rtl_primitive:
+    revision: c60f16a1cb804abf887538d033dd021f9c7e6f28
+    version: null
+    source:
+      Git: https://github.com/shotaminato/rtl_primitive.git
+    dependencies: []
+  spi:
+    revision: f4cc4266f53697004e93c78b5e04594664bcb54c
+    version: null
+    source:
+      Git: https://github.com/shotaminato/spi.git
+    dependencies:
+    - rtl_primitive
