@@ -25,7 +25,8 @@ module sd_card_ctrl_tb;
         .CLK_FREQ_HZ         (CLK_FREQ_HZ),
         .SCLK_FREQ_HZ        (SCLK_FREQ_HZ),
         .UART_BAUD_RATE      (UART_BAUD_RATE),
-        .ACMD41_MAX_ATTEMPTS (4)
+        .ACMD41_MAX_ATTEMPTS (4),
+        .READ_TOKEN_MAX_BYTES(16)
     ) dut (
         .i_clk    (i_clk),
         .i_rst_n  (i_rst_n),
@@ -90,6 +91,19 @@ module sd_card_ctrl_tb;
                 $fatal(1,
                        "UART mismatch at character %0d: expected 0x%02x, got 0x%02x",
                        char_index, expected[char_index], received);
+            end
+        end
+    endtask
+
+    task automatic expect_uart_read_data;
+        logic [7:0] received;
+
+        for (int byte_index = 0; byte_index < 512; byte_index++) begin
+            receive_uart_byte(received);
+            if (received !== byte_index[7:0]) begin
+                $fatal(1,
+                       "UART read data mismatch at byte %0d: expected 0x%02x, got 0x%02x",
+                       byte_index, byte_index[7:0], received);
             end
         end
     endtask
@@ -166,6 +180,37 @@ module sd_card_ctrl_tb;
         i_miso = 1'b1;
     endtask
 
+    task automatic exchange_read_block;
+        logic [47:0] cmd17_packet;
+
+        cmd17_packet = 48'h510000000001;
+        wait_for_next_command();
+
+        for (int byte_index = 0; byte_index < 6; byte_index++) begin
+            exchange_byte(
+                cmd17_packet[47-(byte_index*8) -: 8],
+                8'hff,
+                byte_index == 0
+            );
+        end
+
+        exchange_byte(8'hff, 8'h00, 1'b0);
+        repeat (2) begin
+            exchange_byte(8'hff, 8'hff, 1'b0);
+        end
+        exchange_byte(8'hff, 8'hfe, 1'b0);
+
+        for (int byte_index = 0; byte_index < 512; byte_index++) begin
+            exchange_byte(8'hff, byte_index[7:0], 1'b0);
+        end
+
+        exchange_byte(8'hff, 8'h12, 1'b0);
+        exchange_byte(8'hff, 8'h34, 1'b0);
+
+        @(posedge o_cs_n);
+        i_miso = 1'b1;
+    endtask
+
     task automatic emulate_successful_card;
         wait_for_initial_clocks();
 
@@ -188,6 +233,7 @@ module sd_card_ctrl_tb;
         wait_for_next_command();
 
         exchange_command(48'h7a0000000001, 8'h00, 4, 32'hc0ff_8000);
+        exchange_read_block();
     endtask
 
     task automatic emulate_cmd0_failure(input int response_mode);
@@ -289,6 +335,9 @@ module sd_card_ctrl_tb;
                 expect_uart_message("ACMD41 OK\r\n");
                 expect_uart_message("CMD58 TX\r\n");
                 expect_uart_message("SD INIT OK\r\n");
+                expect_uart_message("CMD17 TX\r\n");
+                expect_uart_message("CMD17 READ OK\r\n");
+                expect_uart_read_data();
             end
         join
         check_idle();
