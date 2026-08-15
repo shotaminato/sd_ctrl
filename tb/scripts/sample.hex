@@ -1,0 +1,4 @@
+# Example hex payload for write_sd_blocks.py --format hex
+# Spaces, comments, and 0x prefixes are ignored.
+AA 55 00 FF
+0xDE 0xAD 0xBE 0xEF
