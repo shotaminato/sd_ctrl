@@ -22,9 +22,10 @@ module sd_card_ctrl_tb;
     logic o_uart_tx;
 
     sd_card_ctrl #(
-        .CLK_FREQ_HZ   (CLK_FREQ_HZ),
-        .SCLK_FREQ_HZ  (SCLK_FREQ_HZ),
-        .UART_BAUD_RATE(UART_BAUD_RATE)
+        .CLK_FREQ_HZ         (CLK_FREQ_HZ),
+        .SCLK_FREQ_HZ        (SCLK_FREQ_HZ),
+        .UART_BAUD_RATE      (UART_BAUD_RATE),
+        .ACMD41_MAX_ATTEMPTS (4)
     ) dut (
         .i_clk    (i_clk),
         .i_rst_n  (i_rst_n),
@@ -93,16 +94,8 @@ module sd_card_ctrl_tb;
         end
     endtask
 
-    task automatic emulate_card(input int response_mode);
+    task automatic wait_for_initial_clocks;
         int initial_clock_count;
-        logic [7:0] expected_command [0:5];
-
-        expected_command[0] = 8'h40;
-        expected_command[1] = 8'h00;
-        expected_command[2] = 8'h00;
-        expected_command[3] = 8'h00;
-        expected_command[4] = 8'h00;
-        expected_command[5] = 8'h95;
 
         initial_clock_count = 0;
         while (o_cs_n === 1'b1) begin
@@ -120,14 +113,98 @@ module sd_card_ctrl_tb;
                    "Only %0d initial SCLK rising edges were generated",
                    initial_clock_count);
         end
+    endtask
 
-        for (int byte_index = 0; byte_index < 6; byte_index++) begin
-            exchange_byte(expected_command[byte_index], 8'hff, byte_index == 0);
+    task automatic wait_for_next_command;
+        int post_clock_count;
+
+        post_clock_count = 0;
+        while (o_cs_n === 1'b1) begin
+            @(posedge o_sclk or negedge o_cs_n);
+            if (o_cs_n === 1'b1) begin
+                post_clock_count++;
+                if (o_mosi !== 1'b1) begin
+                    $fatal(1, "MOSI must remain High between commands");
+                end
+            end
         end
 
-        if (response_mode == RESPONSE_OK) begin
-            exchange_byte(8'hff, 8'h01, 1'b0);
-        end else if (response_mode == RESPONSE_R1_ERROR) begin
+        if (post_clock_count < 8) begin
+            $fatal(1,
+                   "Only %0d post-command SCLK rising edges were generated",
+                   post_clock_count);
+        end
+    endtask
+
+    task automatic exchange_command(
+        input logic [47:0] expected_command,
+        input logic [7:0] r1_response,
+        input int payload_byte_count,
+        input logic [31:0] response_payload
+    );
+        for (int byte_index = 0; byte_index < 6; byte_index++) begin
+            exchange_byte(
+                expected_command[47-(byte_index*8) -: 8],
+                8'hff,
+                byte_index == 0
+            );
+        end
+
+        exchange_byte(8'hff, r1_response, 1'b0);
+
+        for (int byte_index = 0;
+             byte_index < payload_byte_count;
+             byte_index++) begin
+            exchange_byte(
+                8'hff,
+                response_payload[31-(byte_index*8) -: 8],
+                1'b0
+            );
+        end
+
+        @(posedge o_cs_n);
+        i_miso = 1'b1;
+    endtask
+
+    task automatic emulate_successful_card;
+        wait_for_initial_clocks();
+
+        exchange_command(48'h400000000095, 8'h01, 0, 32'h0000_0000);
+        wait_for_next_command();
+
+        exchange_command(48'h48000001aa87, 8'h01, 4, 32'h0000_01aa);
+        wait_for_next_command();
+
+        exchange_command(48'h770000000001, 8'h01, 0, 32'h0000_0000);
+        wait_for_next_command();
+
+        exchange_command(48'h694000000001, 8'h01, 0, 32'h0000_0000);
+        wait_for_next_command();
+
+        exchange_command(48'h770000000001, 8'h01, 0, 32'h0000_0000);
+        wait_for_next_command();
+
+        exchange_command(48'h694000000001, 8'h00, 0, 32'h0000_0000);
+        wait_for_next_command();
+
+        exchange_command(48'h7a0000000001, 8'h00, 4, 32'hc0ff_8000);
+    endtask
+
+    task automatic emulate_cmd0_failure(input int response_mode);
+        logic [47:0] cmd0_packet;
+
+        cmd0_packet = 48'h400000000095;
+        wait_for_initial_clocks();
+
+        for (int byte_index = 0; byte_index < 6; byte_index++) begin
+            exchange_byte(
+                cmd0_packet[47-(byte_index*8) -: 8],
+                8'hff,
+                byte_index == 0
+            );
+        end
+
+        if (response_mode == RESPONSE_R1_ERROR) begin
             exchange_byte(8'hff, 8'h05, 1'b0);
         end else begin
             repeat (8) begin
@@ -139,10 +216,7 @@ module sd_card_ctrl_tb;
         i_miso = 1'b1;
     endtask
 
-    task automatic run_scenario(
-        input int response_mode,
-        input string final_message
-    );
+    task automatic apply_reset;
         i_rst_n = 1'b0;
         i_miso = 1'b1;
         repeat (5) @(posedge i_clk);
@@ -156,10 +230,24 @@ module sd_card_ctrl_tb;
 
         @(negedge i_clk);
         i_rst_n = 1'b1;
+    endtask
+
+    task automatic check_idle;
+        repeat (UART_CYCLES_PER_BIT + 5) @(posedge i_clk);
+        if ((o_cs_n !== 1'b1) | (o_sclk !== 1'b0)) begin
+            $fatal(1, "SPI outputs did not return to idle");
+        end
+    endtask
+
+    task automatic run_cmd0_failure(
+        input int response_mode,
+        input string final_message
+    );
+        apply_reset();
 
         fork
             begin
-                emulate_card(response_mode);
+                emulate_cmd0_failure(response_mode);
             end
             begin
                 expect_uart_message("80CLK OK\r\n");
@@ -168,10 +256,7 @@ module sd_card_ctrl_tb;
             end
         join
 
-        repeat (UART_CYCLES_PER_BIT + 5) @(posedge i_clk);
-        if ((o_cs_n !== 1'b1) | (o_sclk !== 1'b0)) begin
-            $fatal(1, "SPI outputs did not return to idle");
-        end
+        check_idle();
     endtask
 
     initial begin
@@ -183,9 +268,33 @@ module sd_card_ctrl_tb;
         i_rst_n = 1'b0;
         i_miso = 1'b1;
 
-        run_scenario(RESPONSE_OK, "CMD0 OK\r\n");
-        run_scenario(RESPONSE_R1_ERROR, "CMD0 R1 ERR\r\n");
-        run_scenario(RESPONSE_TIMEOUT, "CMD0 TIMEOUT\r\n");
+        apply_reset();
+        fork
+            begin
+                emulate_successful_card();
+            end
+            begin
+                expect_uart_message("80CLK OK\r\n");
+                expect_uart_message("CMD0 TX\r\n");
+                expect_uart_message("CMD0 OK\r\n");
+                expect_uart_message("CMD8 TX\r\n");
+                expect_uart_message("CMD8 OK\r\n");
+                expect_uart_message("CMD55 TX\r\n");
+                expect_uart_message("CMD55 OK\r\n");
+                expect_uart_message("ACMD41 TX\r\n");
+                expect_uart_message("ACMD41 BUSY\r\n");
+                expect_uart_message("CMD55 TX\r\n");
+                expect_uart_message("CMD55 OK\r\n");
+                expect_uart_message("ACMD41 TX\r\n");
+                expect_uart_message("ACMD41 OK\r\n");
+                expect_uart_message("CMD58 TX\r\n");
+                expect_uart_message("SD INIT OK\r\n");
+            end
+        join
+        check_idle();
+
+        run_cmd0_failure(RESPONSE_R1_ERROR, "CMD0 R1 ERR\r\n");
+        run_cmd0_failure(RESPONSE_TIMEOUT, "CMD0 TIMEOUT\r\n");
 
         $display("sd_card_ctrl_tb: PASS");
         $finish;
