@@ -9,6 +9,7 @@ package:
 dependencies:
   rtl_primitive: { git: "https://github.com/shotaminato/rtl_primitive.git", rev: "main" }
   spi: { git: "https://github.com/shotaminato/spi.git", rev: "main" }
+  uart: { git: "https://github.com/shotaminato/uart.git", rev: "main" }
 
 sources:
   - rtl/spi.sv

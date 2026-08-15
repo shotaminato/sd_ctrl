@@ -12,3 +12,10 @@ packages:
       Git: https://github.com/shotaminato/spi.git
     dependencies:
     - rtl_primitive
+  uart:
+    revision: 4410314af25995972a1f896dba4b7c297425b7a0
+    version: null
+    source:
+      Git: https://github.com/shotaminato/uart.git
+    dependencies:
+    - rtl_primitive
