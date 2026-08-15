@@ -341,14 +341,10 @@ module sd_card_ctrl #(
     assign cmd55_result = (spi_rx_data == 8'h01)
                         ? RESULT_OK : RESULT_ERROR;
     assign acmd41_result = result_t'(
-        ((spi_rx_data == 8'h00) ?
-            RESULT_OK : '0) |
-        (((spi_rx_data == 8'h01) && acmd41_last_attempt) ?
-            RESULT_TIMEOUT : '0) |
-        (((spi_rx_data == 8'h01) && !acmd41_last_attempt) ?
-            RESULT_BUSY : '0) |
-        (((spi_rx_data != 8'h00) && (spi_rx_data != 8'h01)) ?
-            RESULT_ERROR : '0)
+        ((spi_rx_data == 8'h00)                             ? RESULT_OK      : '0) |
+        (((spi_rx_data == 8'h01) && acmd41_last_attempt   ) ? RESULT_TIMEOUT : '0) |
+        (((spi_rx_data == 8'h01) && !acmd41_last_attempt  ) ? RESULT_BUSY    : '0) |
+        (((spi_rx_data != 8'h00) && (spi_rx_data != 8'h01)) ? RESULT_ERROR   : '0)
     );
     assign cmd58_result =
         ((r1_byte == 8'h00) && response_payload[31])
@@ -360,20 +356,13 @@ module sd_card_ctrl #(
     );
 
     assign result_d = result_t'(
-        (r1_timeout ?
-            RESULT_TIMEOUT : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD0)) ?
-            cmd0_result : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD8)) ?
-            cmd8_result : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD55)) ?
-            cmd55_result : '0) |
-        ((!r1_timeout && (command == COMMAND_ACMD41)) ?
-            acmd41_result : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD58)) ?
-            cmd58_result : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD17)) ?
-            cmd17_result : '0)
+        (r1_timeout                                   ? RESULT_TIMEOUT : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD0)  ) ? cmd0_result    : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD8)  ) ? cmd8_result    : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD55) ) ? cmd55_result   : '0) |
+        ((!r1_timeout && (command == COMMAND_ACMD41)) ? acmd41_result  : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD58) ) ? cmd58_result   : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD17) ) ? cmd17_result   : '0)
     );
 
     `DFFR_VAL(result, result_d, transfer_done, i_clk, i_rst_n, RESULT_NONE)
@@ -411,13 +400,13 @@ module sd_card_ctrl #(
            ? (read_byte_count + 10'd1)
            : read_byte_count);
 
-    `DFFR(r1_seen       , r1_seen_d       , 1'b1    , i_clk, i_rst_n)
-    `DFFR(r1_byte       , r1_byte_d       , r1_valid, i_clk, i_rst_n)
-    `DFFR(response_index, response_index_d, 1'b1    , i_clk, i_rst_n)
-    `DFFR(response_data , response_data_d , 1'b1    , i_clk, i_rst_n)
-    `DFFR(read_token_seen      , read_token_seen_d      , 1'b1, i_clk, i_rst_n)
-    `DFFR(read_token_wait_count, read_token_wait_count_d, 1'b1, i_clk, i_rst_n)
-    `DFFR(read_byte_count      , read_byte_count_d      , 1'b1, i_clk, i_rst_n)
+    `DFFR(r1_seen              , r1_seen_d              , 1'b1    , i_clk, i_rst_n)
+    `DFFR(r1_byte              , r1_byte_d              , r1_valid, i_clk, i_rst_n)
+    `DFFR(response_index       , response_index_d       , 1'b1    , i_clk, i_rst_n)
+    `DFFR(response_data        , response_data_d        , 1'b1    , i_clk, i_rst_n)
+    `DFFR(read_token_seen      , read_token_seen_d      , 1'b1    , i_clk, i_rst_n)
+    `DFFR(read_token_wait_count, read_token_wait_count_d, 1'b1    , i_clk, i_rst_n)
+    `DFFR(read_byte_count      , read_byte_count_d      , 1'b1    , i_clk, i_rst_n)
 
     // -------------------------------------------------------------------------
     // UART message output
