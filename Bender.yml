@@ -12,8 +12,10 @@ dependencies:
   uart: { git: "https://github.com/shotaminato/uart.git", rev: "main" }
 
 sources:
-  - rtl/spi.sv
-  - rtl/sd_init.sv
+  - rtl/sd_card_ctrl.sv
+  - target: test
+    files:
+      - tb/sd_card_ctrl_tb.sv
 
 workspace:
   checkout_dir: deps
