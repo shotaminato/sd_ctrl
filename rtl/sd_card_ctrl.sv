@@ -24,11 +24,11 @@ module sd_card_ctrl #(
     localparam int unsigned UART_CLK_FREQ_MHZ = CLK_FREQ_HZ / 1_000_000;
     localparam int unsigned MSG_MAX_BYTES = 14;
 
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CLOCK_OK = "80CLK OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD_TX = "CMD0 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD_OK = "CMD0 OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_R1_ERROR = "CMD0 R1 ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_TIMEOUT = "CMD0 TIMEOUT\r\n";
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CLOCK_OK = "80CLK OK\r\n"    ;
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD_TX   = "CMD0 TX\r\n"     ;
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD_OK   = "CMD0 OK\r\n"     ;
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_R1_ERROR = "CMD0 R1 ERR\r\n" ;
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_TIMEOUT  = "CMD0 TIMEOUT\r\n";
 
     // -------------------------------------------------------------------------
     // Controller state and result encoding
@@ -170,17 +170,26 @@ module sd_card_ctrl #(
     // Characters advance only on the uart_valid/uart_ready handshake.
     // -------------------------------------------------------------------------
 
-    assign uart_message_active = (state == MSG_CLOCK)
-                               | (state == MSG_CMD)
-                               | (state == MSG_RESULT);
-    assign uart_message_length = (state == MSG_CLOCK) ? 5'd10
-                               : (state == MSG_CMD) ? 5'd9
-                               : ((result == RESULT_OK) ? 5'd9
-                                  : ((result == RESULT_R1_ERROR) ? 5'd13 : 5'd14));
-    assign uart_message = (state == MSG_CLOCK) ? MSG_CLOCK_OK
-                        : (state == MSG_CMD) ? MSG_CMD_TX
-                        : ((result == RESULT_OK) ? MSG_CMD_OK
-                           : ((result == RESULT_R1_ERROR) ? MSG_R1_ERROR : MSG_TIMEOUT));
+    assign uart_message_active =
+        (state == MSG_CLOCK ) |
+        (state == MSG_CMD   ) |
+        (state == MSG_RESULT);
+
+    assign uart_message_length =
+        ((state == MSG_CLOCK ) ? 5'd10 : '0) |
+        ((state == MSG_CMD   ) ? 5'd9  : '0) |
+        ((state == MSG_RESULT) ?
+            (((result == RESULT_OK      ) ? 5'd9  : '0) |
+             ((result == RESULT_R1_ERROR) ? 5'd13 : '0) |
+             ((result == RESULT_TIMEOUT ) ? 5'd14 : '0)) : '0);
+
+    assign uart_message =
+        ((state == MSG_CLOCK ) ? MSG_CLOCK_OK : '0) |
+        ((state == MSG_CMD   ) ? MSG_CMD_TX   : '0) |
+        ((state == MSG_RESULT) ?
+            (((result == RESULT_OK      ) ? MSG_CMD_OK   : '0) |
+             ((result == RESULT_R1_ERROR) ? MSG_R1_ERROR : '0) |
+             ((result == RESULT_TIMEOUT ) ? MSG_TIMEOUT  : '0)) : '0);
     assign uart_byte_number = uart_message_active
                             ? (uart_message_length - 5'd1 - {1'b0, uart_index})
                             : 5'd0;
@@ -204,23 +213,17 @@ module sd_card_ctrl #(
     // DONE          : hold the interface idle until reset
     // -------------------------------------------------------------------------
 
-    assign state_d = (state == INIT_CLOCKS)
-                   ? ((spi_sclk_count >= 10'd80) ? INIT_STOP : INIT_CLOCKS)
-                   : (state == INIT_STOP)
-                     ? (!o_sclk ? MSG_CLOCK : INIT_STOP)
-                     : (state == MSG_CLOCK)
-                       ? (uart_message_done ? LOAD_CMD : MSG_CLOCK)
-                       : (state == LOAD_CMD)
-                         ? ((spi_tx_fire & (cmd_index == 3'd5)) ? MSG_CMD : LOAD_CMD)
-                         : (state == MSG_CMD)
-                           ? (uart_message_done ? TRANSFER : MSG_CMD)
-                           : (state == TRANSFER)
-                             ? (transfer_done ? TRANSFER_STOP : TRANSFER)
-                             : (state == TRANSFER_STOP)
-                               ? (!o_sclk ? MSG_RESULT : TRANSFER_STOP)
-                               : (state == MSG_RESULT)
-                                 ? (uart_message_done ? DONE : MSG_RESULT)
-                                 : DONE;
+    assign state_d = state_t'(
+        ((state == INIT_CLOCKS  ) ? ((spi_sclk_count >= 10'd80)          ? INIT_STOP     : INIT_CLOCKS  ) : '0) |
+        ((state == INIT_STOP    ) ? (!o_sclk                             ? MSG_CLOCK     : INIT_STOP    ) : '0) |
+        ((state == MSG_CLOCK    ) ? (uart_message_done                   ? LOAD_CMD      : MSG_CLOCK    ) : '0) |
+        ((state == LOAD_CMD     ) ? ((spi_tx_fire & (cmd_index == 3'd5)) ? MSG_CMD       : LOAD_CMD     ) : '0) |
+        ((state == MSG_CMD      ) ? (uart_message_done                   ? TRANSFER      : MSG_CMD      ) : '0) |
+        ((state == TRANSFER     ) ? (transfer_done                       ? TRANSFER_STOP : TRANSFER     ) : '0) |
+        ((state == TRANSFER_STOP) ? (!o_sclk                             ? MSG_RESULT    : TRANSFER_STOP) : '0) |
+        ((state == MSG_RESULT   ) ? (uart_message_done                   ? DONE          : MSG_RESULT   ) : '0) |
+        ((state == DONE         ) ? (DONE                                                               ) : '0)
+    );
 
     // -------------------------------------------------------------------------
     // Index next-state logic
