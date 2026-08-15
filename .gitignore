@@ -1,5 +1,6 @@
 .vscode
 .bak
+__pycache__
 
 .bender
 
@@ -9,3 +10,5 @@ quartus/simulation
 quartus/output_files
 quartus/c5_pin_model_dump.txt
 quartus/sd_card_ctrl.qws
+
+tb/scripts/*.bin
