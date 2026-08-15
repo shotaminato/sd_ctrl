@@ -1,0 +1,18 @@
+# A more detailed description of the manifest format `Bender.yml` can be found here:
+# https://github.com/pulp-platform/bender#manifest-format-benderyml
+
+package:
+  name: sd_ctrl
+  authors:
+    - "ShotaMinato <tyuntune@gmail.com>"
+
+dependencies:
+  rtl_primitive: { git: "https://github.com/shotaminato/rtl_primitive.git", rev: "main" }
+  spi: { git: "https://github.com/shotaminato/spi.git", rev: "main" }
+
+sources:
+  - rtl/spi.sv
+  - rtl/sd_init.sv
+
+workspace:
+  checkout_dir: deps
