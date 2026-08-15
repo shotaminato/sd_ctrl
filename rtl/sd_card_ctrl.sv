@@ -163,6 +163,8 @@ module sd_card_ctrl #(
                     ? RESULT_TIMEOUT
                     : ((spi_rx_data == 8'h01) ? RESULT_OK : RESULT_R1_ERROR);
 
+    `DFFR_VAL(result, result_d, transfer_done, i_clk, i_rst_n, RESULT_NONE)
+
     // -------------------------------------------------------------------------
     // UART message output
     //
@@ -190,6 +192,7 @@ module sd_card_ctrl #(
             (((result == RESULT_OK      ) ? MSG_CMD_OK   : '0) |
              ((result == RESULT_R1_ERROR) ? MSG_R1_ERROR : '0) |
              ((result == RESULT_TIMEOUT ) ? MSG_TIMEOUT  : '0)) : '0);
+
     assign uart_byte_number = uart_message_active
                             ? (uart_message_length - 5'd1 - {1'b0, uart_index})
                             : 5'd0;
@@ -225,6 +228,8 @@ module sd_card_ctrl #(
         ((state == DONE         ) ? (DONE                                                               ) : '0)
     );
 
+    `DFFR_VAL(state, state_d, 1'b1, i_clk, i_rst_n, INIT_CLOCKS)
+
     // -------------------------------------------------------------------------
     // Index next-state logic
     //
@@ -233,28 +238,19 @@ module sd_card_ctrl #(
     // -------------------------------------------------------------------------
 
     assign cmd_index_d = (state != LOAD_CMD)
-                       ? 3'd0
+                       ? '0
                        : (spi_tx_fire ? (cmd_index + 3'd1) : cmd_index);
     assign rx_index_d = (state != TRANSFER)
-                      ? 4'd0
+                      ? '0
                       : (spi_rx_fire ? (rx_index + 4'd1) : rx_index);
     assign uart_index_d = !uart_message_active
-                        ? 4'd0
+                        ? '0
                         : (uart_fire
                            ? (uart_message_done ? 4'd0 : (uart_index + 4'd1))
                            : uart_index);
 
-    // -------------------------------------------------------------------------
-    // Sequential registers
-    //
-    // All state is implemented with rtl_primitive DFF macros. No behavioral
-    // sequential block is declared directly in this module.
-    // -------------------------------------------------------------------------
-
-    `DFFR_VAL(state, state_d, 1'b1, i_clk, i_rst_n, INIT_CLOCKS)
-    `DFFR_VAL(result, result_d, transfer_done, i_clk, i_rst_n, RESULT_NONE)
-    `DFFR(cmd_index, cmd_index_d, 1'b1, i_clk, i_rst_n)
-    `DFFR(rx_index, rx_index_d, 1'b1, i_clk, i_rst_n)
+    `DFFR(cmd_index , cmd_index_d , 1'b1, i_clk, i_rst_n)
+    `DFFR(rx_index  , rx_index_d  , 1'b1, i_clk, i_rst_n)
     `DFFR(uart_index, uart_index_d, 1'b1, i_clk, i_rst_n)
 
     // -------------------------------------------------------------------------
