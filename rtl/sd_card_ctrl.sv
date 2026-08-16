@@ -275,18 +275,17 @@ module sd_card_ctrl #(
         (cmd_index[1] ? command_data[39:32] : '0) |
         (cmd_index[2] ? command_data[31:24] : '0) |
         (cmd_index[3] ? command_data[23:16] : '0) |
-        (cmd_index[4] ? command_data[15:8]  : '0) |
-        (cmd_index[5] ? command_data[7:0]   : '0);
+        (cmd_index[4] ? command_data[15: 8] : '0) |
+        (cmd_index[5] ? command_data[ 7: 0] : '0);
 
     assign spi_tx_valid = state == LOAD_CMD;
     assign spi_tx_fire = spi_tx_valid & spi_tx_ready;
 
     // -------------------------------------------------------------------------
-    // Command response receive and timeout handling
+    // SPI receive handshake and R1 response detection
     //
     // Received bytes 0 through 5 overlap the transmitted command and are
-    // ignored. CMD8 and CMD58 collect four additional R7/R3 bytes after R1.
-    // CMD17 waits for FEh, receives 512 data bytes, then consumes two CRC bytes.
+    // ignored. A response byte with bit 7 cleared is accepted as R1.
     // -------------------------------------------------------------------------
 
     assign spi_rx_ready = state == TRANSFER;
@@ -297,10 +296,24 @@ module sd_card_ctrl #(
         spi_rx_fire & !r1_seen & (rx_index >= 4'd6) & !spi_rx_data[7];
     assign r1_timeout =
         spi_rx_fire & !r1_seen & (rx_index == 4'd13) & spi_rx_data[7];
+
+    // -------------------------------------------------------------------------
+    // R3/R7 extended response handling
+    //
+    // CMD8 and CMD58 collect four additional response bytes after R1.
+    // -------------------------------------------------------------------------
+
     assign response_capture = spi_rx_fire & r1_seen & response_needed;
     assign response_complete =
         response_capture & (response_index == 2'd3);
     assign response_payload = {response_data[23:0], spi_rx_data};
+
+    // -------------------------------------------------------------------------
+    // CMD17 data-block handling
+    //
+    // Wait for FEh, store 512 data bytes, then consume two CRC bytes.
+    // -------------------------------------------------------------------------
+
     assign cmd17_r1_error =
         r1_valid & (command == COMMAND_CMD17) & (spi_rx_data != 8'h00);
     assign read_token_valid =
@@ -321,6 +334,11 @@ module sd_card_ctrl #(
     assign read_fifo_write_valid =
         read_data_capture & (read_byte_count < 10'd512)
         & read_fifo_write_ready;
+
+    // -------------------------------------------------------------------------
+    // Transfer completion and command result decoding
+    // -------------------------------------------------------------------------
+
     assign transfer_done =
         r1_timeout |
         (r1_valid & !response_needed & (command != COMMAND_CMD17)) |
@@ -366,6 +384,10 @@ module sd_card_ctrl #(
     );
 
     `DFFR_VAL(result, result_d, transfer_done, i_clk, i_rst_n, RESULT_NONE)
+
+    // -------------------------------------------------------------------------
+    // Response state and receive counters
+    // -------------------------------------------------------------------------
 
     assign r1_seen_d = (state != TRANSFER)
                      ? 1'b0
