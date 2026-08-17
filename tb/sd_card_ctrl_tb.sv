@@ -13,7 +13,10 @@ module sd_card_ctrl_tb;
     localparam int RESPONSE_R1_ERROR = 1;
     localparam int RESPONSE_TIMEOUT = 2;
     localparam logic [47:0] CMD17_PACKET = 48'h51_00000001_01;
+    localparam logic [47:0] CMD24_PACKET = 48'h58_00000000_01;
     localparam int READ_CHUNK = 3;
+    localparam int WRITE_CHUNK = 3;
+    localparam logic [49:0] WRITE_ADDRESS = 50'd3;
 
     logic i_clk;
     logic i_rst_n;
@@ -25,11 +28,13 @@ module sd_card_ctrl_tb;
     logic o_uart_tx;
 
     sd_card_ctrl_top #(
-        .CLK_FREQ_HZ         (CLK_FREQ_HZ),
-        .SCLK_FREQ_HZ        (SCLK_FREQ_HZ),
-        .UART_BAUD_RATE      (UART_BAUD_RATE),
-        .ACMD41_MAX_ATTEMPTS (4),
-        .READ_TOKEN_MAX_BYTES(16)
+        .CLK_FREQ_HZ              (CLK_FREQ_HZ),
+        .SCLK_FREQ_HZ             (SCLK_FREQ_HZ),
+        .UART_BAUD_RATE           (UART_BAUD_RATE),
+        .ACMD41_MAX_ATTEMPTS      (4),
+        .READ_TOKEN_MAX_BYTES     (16),
+        .WRITE_RESPONSE_MAX_BYTES (64),
+        .WRITE_BUSY_MAX_BYTES     (64)
     ) dut (
         .i_clk    (i_clk),
         .i_rst_n  (i_rst_n),
@@ -214,6 +219,101 @@ module sd_card_ctrl_tb;
         i_miso = 1'b1;
     endtask
 
+    function automatic logic [511:0] pack_write_data;
+        logic [511:0] data;
+        data = '0;
+        for (int byte_index = 0; byte_index < 64; byte_index++) begin
+            data[(63 - byte_index) * 8 +: 8] = 8'(8'ha0 + byte_index);
+        end
+        return data;
+    endfunction
+
+    task automatic capture_byte(
+        output logic [7:0] observed_tx,
+        input logic [7:0] response,
+        input logic first_byte
+    );
+        if (first_byte) begin
+            i_miso = response[7];
+        end else begin
+            @(negedge o_sclk);
+            i_miso = response[7];
+        end
+
+        observed_tx = '0;
+        for (int bit_index = 7; bit_index >= 0; bit_index--) begin
+            @(posedge o_sclk);
+            #1ns;
+            observed_tx[bit_index] = o_mosi;
+            if (bit_index > 0) begin
+                @(negedge o_sclk);
+                i_miso = response[bit_index-1];
+            end
+        end
+    endtask
+
+    task automatic exchange_write_block;
+        logic [7:0] observed_tx;
+        logic [7:0] expected_data;
+        int timeout_bytes;
+
+        @(negedge o_cs_n);
+
+        for (int byte_index = 0; byte_index < 6; byte_index++) begin
+            exchange_byte(
+                CMD24_PACKET[47-(byte_index*8) -: 8],
+                8'hff,
+                byte_index == 0
+            );
+        end
+
+        exchange_byte(8'hff, 8'h00, 1'b0);
+
+        timeout_bytes = 0;
+        observed_tx = 8'hff;
+        while (observed_tx === 8'hff) begin
+            timeout_bytes++;
+            if (timeout_bytes > 16) begin
+                $fatal(1, "Timed out waiting for CMD24 start token");
+            end
+            capture_byte(observed_tx, 8'hff, 1'b0);
+        end
+
+        if (observed_tx !== 8'hfe) begin
+            $fatal(1, "CMD24 start token mismatch: got 0x%02x", observed_tx);
+        end
+
+        for (int byte_index = 0; byte_index < 512; byte_index++) begin
+            expected_data = (byte_index[8:6] == WRITE_CHUNK[2:0])
+                          ? 8'(8'ha0 + byte_index[5:0])
+                          : 8'h00;
+            exchange_byte(expected_data, 8'hff, 1'b0);
+        end
+
+        exchange_byte(8'hff, 8'hff, 1'b0);
+        exchange_byte(8'hff, 8'hff, 1'b0);
+        exchange_byte(8'hff, 8'h05, 1'b0);
+        repeat (2) begin
+            exchange_byte(8'hff, 8'h00, 1'b0);
+        end
+        exchange_byte(8'hff, 8'hff, 1'b0);
+
+        @(posedge o_cs_n);
+        i_miso = 1'b1;
+    endtask
+
+    task automatic issue_write_request;
+        wait (dut.u_sd_card_ctrl.o_write_ready === 1'b1);
+        dut.write_address = WRITE_ADDRESS;
+        dut.write_data = pack_write_data();
+        dut.write_valid = 1'b1;
+        @(posedge i_clk);
+        while (dut.u_sd_card_ctrl.o_write_ready === 1'b1) begin
+            @(posedge i_clk);
+        end
+        dut.write_valid = 1'b0;
+    endtask
+
     task automatic emulate_successful_card;
         wait_for_initial_clocks();
 
@@ -275,6 +375,7 @@ module sd_card_ctrl_tb;
             | (o_sclk !== 1'b0)
             | (o_mosi !== 1'b1)
             | (dut.u_sd_card_ctrl.o_read_ready !== 1'b0)
+            | (dut.u_sd_card_ctrl.o_write_ready !== 1'b0)
             | (o_uart_tx !== 1'b1)) begin
             $fatal(1, "Reset outputs are incorrect");
         end
@@ -284,9 +385,22 @@ module sd_card_ctrl_tb;
     endtask
 
     task automatic check_idle;
-        repeat (UART_CYCLES_PER_BIT + 5) @(posedge i_clk);
-        if ((o_cs_n !== 1'b1) | (o_sclk !== 1'b0)) begin
-            $fatal(1, "SPI outputs did not return to idle");
+        int idle_cycles;
+        int wait_cycles;
+
+        idle_cycles = 0;
+        wait_cycles = 0;
+        while (idle_cycles < 8) begin
+            @(posedge i_clk);
+            wait_cycles++;
+            if (wait_cycles > 100000) begin
+                $fatal(1, "Timed out waiting for SPI idle");
+            end
+            if ((o_cs_n === 1'b1) && (o_sclk === 1'b0)) begin
+                idle_cycles++;
+            end else begin
+                idle_cycles = 0;
+            end
         end
     endtask
 
@@ -310,6 +424,9 @@ module sd_card_ctrl_tb;
         check_idle();
         if (dut.u_sd_card_ctrl.o_read_ready !== 1'b0) begin
             $fatal(1, "Read request became ready after initialization failure");
+        end
+        if (dut.u_sd_card_ctrl.o_write_ready !== 1'b0) begin
+            $fatal(1, "Write request became ready after initialization failure");
         end
     endtask
 
@@ -350,6 +467,21 @@ module sd_card_ctrl_tb;
             end
         join
         check_idle();
+
+        fork
+            begin
+                issue_write_request();
+                exchange_write_block();
+            end
+            begin
+                expect_uart_message("CMD24 TX\r\n");
+                expect_uart_message("CMD24 WRITE OK\r\n");
+            end
+        join
+        check_idle();
+        if (dut.u_sd_card_ctrl.o_write_ready !== 1'b1) begin
+            $fatal(1, "Write port did not return to ready after CMD24");
+        end
 
         run_cmd0_failure(RESPONSE_R1_ERROR, "CMD0 R1 ERR\r\n");
         run_cmd0_failure(RESPONSE_TIMEOUT, "CMD0 TIMEOUT\r\n");

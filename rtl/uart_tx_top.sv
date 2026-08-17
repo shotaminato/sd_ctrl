@@ -31,6 +31,7 @@ module uart_tx_top #(
     localparam logic [2:0] COMMAND_ACMD41 = 3'd3;
     localparam logic [2:0] COMMAND_CMD58  = 3'd4;
     localparam logic [2:0] COMMAND_CMD17  = 3'd5;
+    localparam logic [2:0] COMMAND_CMD24  = 3'd6;
 
     localparam logic [2:0] RESULT_OK      = 3'd1;
     localparam logic [2:0] RESULT_ERROR   = 3'd2;
@@ -44,12 +45,14 @@ module uart_tx_top #(
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_TX      = "ACMD41 TX\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_TX       = "CMD58 TX\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_TX       = "CMD17 TX\r\n";
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD24_TX       = "CMD24 TX\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_OK        = "CMD0 OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_OK        = "CMD8 OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_OK       = "CMD55 OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_OK      = "ACMD41 OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_SD_INIT_OK     = "SD INIT OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_OK       = "CMD17 READ OK\r\n";
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD24_OK       = "CMD24 WRITE OK\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_BUSY    = "ACMD41 BUSY\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_ERROR     = "CMD0 R1 ERR\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_ERROR     = "CMD8 R7 ERR\r\n";
@@ -57,12 +60,14 @@ module uart_tx_top #(
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_ERROR   = "ACMD41 R1 ERR\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_ERROR    = "CMD58 OCR ERR\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_ERROR    = "CMD17 READ ERR\r\n";
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD24_ERROR    = "CMD24 WR ERR\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_TIMEOUT   = "CMD0 TIMEOUT\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_TIMEOUT   = "CMD8 TIMEOUT\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_TIMEOUT  = "CMD55 TIMEOUT\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_TIMEOUT = "ACMD41 TIMEOUT\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_TIMEOUT  = "CMD58 TIMEOUT\r\n";
     localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_TIMEOUT  = "CMD17 TIMEOUT\r\n";
+    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD24_TIMEOUT  = "CMD24 TIMEOUT\r\n";
 
     logic [7:0] event_wdata;
     logic event_wvalid;
@@ -148,7 +153,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? MSG_CMD55_TX  : '0) |
         ((active_command == COMMAND_ACMD41) ? MSG_ACMD41_TX : '0) |
         ((active_command == COMMAND_CMD58 ) ? MSG_CMD58_TX  : '0) |
-        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_TX  : '0);
+        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_TX  : '0) |
+        ((active_command == COMMAND_CMD24 ) ? MSG_CMD24_TX  : '0);
 
     assign uart_command_message_length =
         ((active_command == COMMAND_CMD0  ) ? 5'd9  : '0) |
@@ -156,7 +162,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? 5'd10 : '0) |
         ((active_command == COMMAND_ACMD41) ? 5'd11 : '0) |
         ((active_command == COMMAND_CMD58 ) ? 5'd10 : '0) |
-        ((active_command == COMMAND_CMD17 ) ? 5'd10 : '0);
+        ((active_command == COMMAND_CMD17 ) ? 5'd10 : '0) |
+        ((active_command == COMMAND_CMD24 ) ? 5'd10 : '0);
 
     assign uart_result_ok_message =
         ((active_command == COMMAND_CMD0  ) ? MSG_CMD0_OK    : '0) |
@@ -164,7 +171,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? MSG_CMD55_OK   : '0) |
         ((active_command == COMMAND_ACMD41) ? MSG_ACMD41_OK  : '0) |
         ((active_command == COMMAND_CMD58 ) ? MSG_SD_INIT_OK : '0) |
-        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_OK   : '0);
+        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_OK   : '0) |
+        ((active_command == COMMAND_CMD24 ) ? MSG_CMD24_OK   : '0);
 
     assign uart_result_ok_message_length =
         ((active_command == COMMAND_CMD0  ) ? 5'd9  : '0) |
@@ -172,7 +180,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? 5'd10 : '0) |
         ((active_command == COMMAND_ACMD41) ? 5'd11 : '0) |
         ((active_command == COMMAND_CMD58 ) ? 5'd12 : '0) |
-        ((active_command == COMMAND_CMD17 ) ? 5'd15 : '0);
+        ((active_command == COMMAND_CMD17 ) ? 5'd15 : '0) |
+        ((active_command == COMMAND_CMD24 ) ? 5'd16 : '0);
 
     assign uart_result_error_message =
         ((active_command == COMMAND_CMD0  ) ? MSG_CMD0_ERROR   : '0) |
@@ -180,7 +189,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? MSG_CMD55_ERROR  : '0) |
         ((active_command == COMMAND_ACMD41) ? MSG_ACMD41_ERROR : '0) |
         ((active_command == COMMAND_CMD58 ) ? MSG_CMD58_ERROR  : '0) |
-        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_ERROR  : '0);
+        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_ERROR  : '0) |
+        ((active_command == COMMAND_CMD24 ) ? MSG_CMD24_ERROR  : '0);
 
     assign uart_result_error_message_length =
         ((active_command == COMMAND_CMD0  ) ? 5'd13 : '0) |
@@ -188,7 +198,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? 5'd14 : '0) |
         ((active_command == COMMAND_ACMD41) ? 5'd15 : '0) |
         ((active_command == COMMAND_CMD58 ) ? 5'd15 : '0) |
-        ((active_command == COMMAND_CMD17 ) ? 5'd16 : '0);
+        ((active_command == COMMAND_CMD17 ) ? 5'd16 : '0) |
+        ((active_command == COMMAND_CMD24 ) ? 5'd14 : '0);
 
     assign uart_result_timeout_message =
         ((active_command == COMMAND_CMD0  ) ? MSG_CMD0_TIMEOUT   : '0) |
@@ -196,7 +207,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? MSG_CMD55_TIMEOUT  : '0) |
         ((active_command == COMMAND_ACMD41) ? MSG_ACMD41_TIMEOUT : '0) |
         ((active_command == COMMAND_CMD58 ) ? MSG_CMD58_TIMEOUT  : '0) |
-        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_TIMEOUT  : '0);
+        ((active_command == COMMAND_CMD17 ) ? MSG_CMD17_TIMEOUT  : '0) |
+        ((active_command == COMMAND_CMD24 ) ? MSG_CMD24_TIMEOUT  : '0);
 
     assign uart_result_timeout_message_length =
         ((active_command == COMMAND_CMD0  ) ? 5'd14 : '0) |
@@ -204,7 +216,8 @@ module uart_tx_top #(
         ((active_command == COMMAND_CMD55 ) ? 5'd15 : '0) |
         ((active_command == COMMAND_ACMD41) ? 5'd16 : '0) |
         ((active_command == COMMAND_CMD58 ) ? 5'd15 : '0) |
-        ((active_command == COMMAND_CMD17 ) ? 5'd15 : '0);
+        ((active_command == COMMAND_CMD17 ) ? 5'd15 : '0) |
+        ((active_command == COMMAND_CMD24 ) ? 5'd14 : '0);
 
     assign uart_selected_result_message =
         ((active_result == RESULT_OK     ) ? uart_result_ok_message      : '0) |

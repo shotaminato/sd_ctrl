@@ -1,8 +1,10 @@
 module sd_card_ctrl #(
-    parameter int unsigned CLK_FREQ_HZ          = 50_000_000,
-    parameter int unsigned SCLK_FREQ_HZ         = 500_000,
-    parameter int unsigned ACMD41_MAX_ATTEMPTS  = 1000,
-    parameter int unsigned READ_TOKEN_MAX_BYTES = 8192
+    parameter int unsigned CLK_FREQ_HZ             = 50_000_000,
+    parameter int unsigned SCLK_FREQ_HZ            = 500_000,
+    parameter int unsigned ACMD41_MAX_ATTEMPTS     = 1000,
+    parameter int unsigned READ_TOKEN_MAX_BYTES    = 8192,
+    parameter int unsigned WRITE_RESPONSE_MAX_BYTES = 8192,
+    parameter int unsigned WRITE_BUSY_MAX_BYTES    = 65535
 ) (
     input  logic i_clk,
     input  logic i_rst_n,
@@ -18,6 +20,11 @@ module sd_card_ctrl #(
     output logic         o_read_data_valid,
     output logic [511:0] o_read_data,
     input  logic         i_read_data_ready,
+
+    input  logic         i_write_valid,
+    input  logic [49:0]  i_write_address,
+    input  logic [511:0] i_write_data,
+    output logic         o_write_ready,
 
     output logic [2:0] o_command,
     output logic [2:0] o_result,
@@ -40,7 +47,8 @@ module sd_card_ctrl #(
     // Controller state and result encoding
     //
     // The FSM generates at least 80 initial clocks, then performs CMD0, CMD8,
-    // CMD55/ACMD41 polling, CMD58, and a CMD17 block read in SD SPI mode.
+    // CMD55/ACMD41 polling, and CMD58. After initialization it accepts
+    // request-driven CMD17 reads and CMD24 writes in SD SPI mode.
     // -------------------------------------------------------------------------
 
     typedef enum logic [3:0] {
@@ -70,7 +78,8 @@ module sd_card_ctrl #(
         COMMAND_CMD55,
         COMMAND_ACMD41,
         COMMAND_CMD58,
-        COMMAND_CMD17
+        COMMAND_CMD17,
+        COMMAND_CMD24
     } command_t;
 
     // -------------------------------------------------------------------------
@@ -92,6 +101,7 @@ module sd_card_ctrl #(
     result_t acmd41_result;
     result_t cmd58_result;
     result_t cmd17_result;
+    result_t cmd24_result;
     command_t command;
     command_t command_d;
     command_t command_after_ok;
@@ -109,6 +119,16 @@ module sd_card_ctrl #(
     logic [49:0] read_request_address;
     logic [511:0] read_data;
     logic [511:0] read_data_d;
+    logic [9:0] write_tx_count;
+    logic [9:0] write_tx_count_d;
+    logic [9:0] write_rx_count;
+    logic [9:0] write_rx_count_d;
+    logic [15:0] write_response_wait_count;
+    logic [15:0] write_response_wait_count_d;
+    logic [15:0] write_busy_wait_count;
+    logic [15:0] write_busy_wait_count_d;
+    logic [49:0] write_request_address;
+    logic [511:0] write_data;
 
     // -------------------------------------------------------------------------
     // SPI controller interface
@@ -118,7 +138,9 @@ module sd_card_ctrl #(
     logic spi_sclk_en;
     logic [9:0] spi_sclk_count;
     logic [31:0] read_address;
+    logic [31:0] write_address;
     logic [47:0] cmd17_data;
+    logic [47:0] cmd24_data;
     logic [47:0] command_data;
     logic [7:0] spi_tx_data;
     logic spi_tx_valid;
@@ -152,6 +174,7 @@ module sd_card_ctrl #(
     logic next_command_available;
     logic read_response_available;
     logic retry_read_available;
+    logic write_done_available;
     logic acmd41_last_attempt;
     logic read_token_seen;
     logic read_token_seen_d;
@@ -164,6 +187,27 @@ module sd_card_ctrl #(
     logic cmd17_r1_error;
     logic read_request_fire;
     logic read_response_fire;
+    logic write_request_fire;
+    logic write_payload_tx;
+    logic write_payload_done;
+    logic write_payload_rx_done;
+    logic write_token_tx;
+    logic write_data_tx;
+    logic write_crc_tx;
+    logic write_slice_selected;
+    logic [9:0] write_block_index;
+    logic [7:0] write_slice_byte;
+    logic write_response_seen;
+    logic write_response_seen_d;
+    logic write_data_accepted;
+    logic write_data_accepted_d;
+    logic write_response_valid;
+    logic write_response_accept;
+    logic write_response_error;
+    logic write_response_timeout;
+    logic write_busy_complete;
+    logic write_busy_timeout;
+    logic cmd24_r1_error;
     logic command_update;
 
     // -------------------------------------------------------------------------
@@ -194,9 +238,11 @@ module sd_card_ctrl #(
 
     // The request address represents physical address bits [55:6].
     // Bits [34:3] are the SDHC 512-byte block address, and bits [2:0]
-    // select one of the eight 64-byte regions returned by CMD17.
+    // select one of the eight 64-byte regions in that block.
     assign read_address = read_request_address[34:3];
+    assign write_address = write_request_address[34:3];
     assign cmd17_data = {8'h51, read_address, 8'h01};
+    assign cmd24_data = {8'h58, write_address, 8'h01};
 
     assign command_data =
         ((command == COMMAND_CMD0  ) ? CMD0_DATA   : '0) |
@@ -204,17 +250,43 @@ module sd_card_ctrl #(
         ((command == COMMAND_CMD55 ) ? CMD55_DATA  : '0) |
         ((command == COMMAND_ACMD41) ? ACMD41_DATA : '0) |
         ((command == COMMAND_CMD58 ) ? CMD58_DATA  : '0) |
-        ((command == COMMAND_CMD17 ) ? cmd17_data  : '0);
+        ((command == COMMAND_CMD17 ) ? cmd17_data  : '0) |
+        ((command == COMMAND_CMD24 ) ? cmd24_data  : '0);
+
+    assign write_payload_done = write_tx_count >= 10'd515;
+    assign write_payload_rx_done = write_rx_count >= 10'd515;
+    assign write_payload_tx =
+        (state == TRANSFER) & (command == COMMAND_CMD24)
+        & r1_seen & !write_payload_done
+        & (write_tx_count <= write_rx_count);
+    assign write_token_tx = write_payload_tx & (write_tx_count == 10'd0);
+    assign write_data_tx =
+        write_payload_tx
+        & (write_tx_count >= 10'd1)
+        & (write_tx_count <= 10'd512);
+    assign write_crc_tx =
+        write_payload_tx
+        & (write_tx_count >= 10'd513)
+        & (write_tx_count <= 10'd514);
+    assign write_block_index = write_tx_count - 10'd1;
+    assign write_slice_selected =
+        write_data_tx
+        & (write_block_index[8:6] == write_request_address[2:0]);
+    assign write_slice_byte =
+        write_data[(6'd63 - write_block_index[5:0]) * 8 +: 8];
 
     assign spi_tx_data =
-        (cmd_index[0] ? command_data[47:40] : '0) |
-        (cmd_index[1] ? command_data[39:32] : '0) |
-        (cmd_index[2] ? command_data[31:24] : '0) |
-        (cmd_index[3] ? command_data[23:16] : '0) |
-        (cmd_index[4] ? command_data[15: 8] : '0) |
-        (cmd_index[5] ? command_data[ 7: 0] : '0);
+        ((state == LOAD_CMD) & cmd_index[0] ? command_data[47:40] : '0) |
+        ((state == LOAD_CMD) & cmd_index[1] ? command_data[39:32] : '0) |
+        ((state == LOAD_CMD) & cmd_index[2] ? command_data[31:24] : '0) |
+        ((state == LOAD_CMD) & cmd_index[3] ? command_data[23:16] : '0) |
+        ((state == LOAD_CMD) & cmd_index[4] ? command_data[15: 8] : '0) |
+        ((state == LOAD_CMD) & cmd_index[5] ? command_data[ 7: 0] : '0) |
+        (write_token_tx ? 8'hfe : '0) |
+        ((write_data_tx & write_slice_selected) ? write_slice_byte : '0) |
+        (write_crc_tx ? 8'hff : '0);
 
-    assign spi_tx_valid = state == LOAD_CMD;
+    assign spi_tx_valid = (state == LOAD_CMD) | write_payload_tx;
     assign spi_tx_fire = spi_tx_valid & spi_tx_ready;
 
     // -------------------------------------------------------------------------
@@ -272,41 +344,81 @@ module sd_card_ctrl #(
         read_data_capture & (read_byte_count == 10'd513);
 
     // -------------------------------------------------------------------------
+    // CMD24 data-block handling
+    //
+    // After R1, send FEh, 512 data bytes, and two CRC bytes. The selected
+    // 64-byte region carries the write payload; the rest of the block is 0.
+    // Then wait for a data-response token and for the card busy flag to clear.
+    // -------------------------------------------------------------------------
+
+    assign cmd24_r1_error =
+        r1_valid & (command == COMMAND_CMD24) & (spi_rx_data != 8'h00);
+    assign write_response_valid =
+        spi_rx_fire & (command == COMMAND_CMD24) & write_payload_rx_done
+        & !write_response_seen & (spi_rx_data != 8'hff);
+    assign write_response_accept =
+        write_response_valid & ((spi_rx_data & 8'h1f) == 8'h05);
+    assign write_response_error =
+        write_response_valid & ((spi_rx_data & 8'h1f) != 8'h05);
+    assign write_response_timeout =
+        spi_rx_fire & (command == COMMAND_CMD24) & write_payload_rx_done
+        & !write_response_seen & (spi_rx_data == 8'hff)
+        & (write_response_wait_count >= (WRITE_RESPONSE_MAX_BYTES - 1));
+    assign write_busy_complete =
+        spi_rx_fire & write_response_seen & write_data_accepted
+        & (spi_rx_data != 8'h00);
+    assign write_busy_timeout =
+        spi_rx_fire & write_response_seen & write_data_accepted
+        & (spi_rx_data == 8'h00)
+        & (write_busy_wait_count >= (WRITE_BUSY_MAX_BYTES - 1));
+
+    // -------------------------------------------------------------------------
     // Transfer completion and command result decoding
     // -------------------------------------------------------------------------
 
     assign transfer_done =
         r1_timeout |
-        (r1_valid & !response_needed & (command != COMMAND_CMD17)) |
+        (r1_valid & !response_needed
+         & (command != COMMAND_CMD17) & (command != COMMAND_CMD24)) |
         response_complete |
         cmd17_r1_error |
         read_token_error |
         read_token_timeout |
-        read_block_complete;
+        read_block_complete |
+        cmd24_r1_error |
+        write_response_error |
+        write_response_timeout |
+        write_busy_timeout |
+        write_busy_complete;
 
     assign acmd41_last_attempt =
         acmd41_attempt_count >= (ACMD41_MAX_ATTEMPTS - 1);
 
-    assign cmd0_result = (spi_rx_data == 8'h01)
-                       ? RESULT_OK : RESULT_ERROR;
-    assign cmd8_result =
+    assign cmd0_result = result_t'(
+        (spi_rx_data == 8'h01) ? RESULT_OK : RESULT_ERROR);
+    assign cmd8_result = result_t'(
         ((r1_byte == 8'h01) && (response_payload == 32'h0000_01aa))
-        ? RESULT_OK : RESULT_ERROR;
-    assign cmd55_result = (spi_rx_data == 8'h01)
-                        ? RESULT_OK : RESULT_ERROR;
+        ? RESULT_OK : RESULT_ERROR);
+    assign cmd55_result = result_t'(
+        (spi_rx_data == 8'h01) ? RESULT_OK : RESULT_ERROR);
     assign acmd41_result = result_t'(
         ((spi_rx_data == 8'h00)                             ? RESULT_OK      : '0) |
         (((spi_rx_data == 8'h01) && acmd41_last_attempt   ) ? RESULT_TIMEOUT : '0) |
         (((spi_rx_data == 8'h01) && !acmd41_last_attempt  ) ? RESULT_BUSY    : '0) |
         (((spi_rx_data != 8'h00) && (spi_rx_data != 8'h01)) ? RESULT_ERROR   : '0)
     );
-    assign cmd58_result =
+    assign cmd58_result = result_t'(
         ((r1_byte == 8'h00) && response_payload[31])
-        ? RESULT_OK : RESULT_ERROR;
+        ? RESULT_OK : RESULT_ERROR);
     assign cmd17_result = result_t'(
         (read_block_complete ? RESULT_OK : '0) |
         (read_token_timeout ? RESULT_TIMEOUT : '0) |
         ((cmd17_r1_error | read_token_error) ? RESULT_ERROR : '0)
+    );
+    assign cmd24_result = result_t'(
+        (write_busy_complete ? RESULT_OK : '0) |
+        ((write_response_timeout | write_busy_timeout) ? RESULT_TIMEOUT : '0) |
+        ((cmd24_r1_error | write_response_error) ? RESULT_ERROR : '0)
     );
 
     assign result_d = result_t'(
@@ -316,7 +428,8 @@ module sd_card_ctrl #(
         ((!r1_timeout && (command == COMMAND_CMD55) ) ? cmd55_result   : '0) |
         ((!r1_timeout && (command == COMMAND_ACMD41)) ? acmd41_result  : '0) |
         ((!r1_timeout && (command == COMMAND_CMD58) ) ? cmd58_result   : '0) |
-        ((!r1_timeout && (command == COMMAND_CMD17) ) ? cmd17_result   : '0)
+        ((!r1_timeout && (command == COMMAND_CMD17) ) ? cmd17_result   : '0) |
+        ((!r1_timeout && (command == COMMAND_CMD24) ) ? cmd24_result   : '0)
     );
 
     `DFFR_VAL(result, result_d, transfer_done, i_clk, i_rst_n, RESULT_NONE)
@@ -361,6 +474,46 @@ module sd_card_ctrl #(
         (( read_data_selected) ? {read_data[503:0], spi_rx_data} : '0) |
         ((!read_data_selected & !read_request_fire) ? read_data : '0);
 
+    assign write_tx_count_d =
+        (state != TRANSFER)
+        ? 10'd0
+        : ((write_payload_tx & spi_tx_fire)
+           ? (write_tx_count + 10'd1)
+           : write_tx_count);
+
+    assign write_rx_count_d =
+        (state != TRANSFER)
+        ? 10'd0
+        : ((spi_rx_fire & r1_seen & (command == COMMAND_CMD24)
+            & (write_rx_count < 10'd515))
+           ? (write_rx_count + 10'd1)
+           : write_rx_count);
+
+    assign write_response_seen_d =
+        (state != TRANSFER)
+        ? 1'b0
+        : (write_response_valid ? 1'b1 : write_response_seen);
+
+    assign write_data_accepted_d =
+        (state != TRANSFER)
+        ? 1'b0
+        : (write_response_accept ? 1'b1 : write_data_accepted);
+
+    assign write_response_wait_count_d =
+        ((state != TRANSFER) | write_response_seen | write_response_valid
+         | !write_payload_rx_done)
+        ? 16'd0
+        : ((spi_rx_fire & (command == COMMAND_CMD24) & (spi_rx_data == 8'hff))
+           ? (write_response_wait_count + 16'd1)
+           : write_response_wait_count);
+
+    assign write_busy_wait_count_d =
+        ((state != TRANSFER) | !write_response_seen | !write_data_accepted)
+        ? 16'd0
+        : ((spi_rx_fire & (spi_rx_data == 8'h00))
+           ? (write_busy_wait_count + 16'd1)
+           : write_busy_wait_count);
+
     `DFFR(r1_seen              , r1_seen_d              , 1'b1    , i_clk, i_rst_n)
     `DFFR(r1_byte              , r1_byte_d              , r1_valid, i_clk, i_rst_n)
     `DFFR(response_index       , response_index_d       , 1'b1    , i_clk, i_rst_n)
@@ -370,6 +523,14 @@ module sd_card_ctrl #(
     `DFFR(read_byte_count      , read_byte_count_d      , 1'b1    , i_clk, i_rst_n)
     `DFFR(read_request_address , i_read_address         , read_request_fire, i_clk, i_rst_n)
     `DFFR(read_data            , read_data_d            , 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_tx_count       , write_tx_count_d       , 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_rx_count       , write_rx_count_d       , 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_response_seen  , write_response_seen_d  , 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_data_accepted  , write_data_accepted_d  , 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_response_wait_count, write_response_wait_count_d, 1'b1, i_clk, i_rst_n)
+    `DFFR(write_busy_wait_count, write_busy_wait_count_d, 1'b1    , i_clk, i_rst_n)
+    `DFFR(write_request_address, i_write_address        , write_request_fire, i_clk, i_rst_n)
+    `DFFR(write_data           , i_write_data           , write_request_fire, i_clk, i_rst_n)
 
     // -------------------------------------------------------------------------
     // Initialization state machine
@@ -381,13 +542,15 @@ module sd_card_ctrl #(
     // TRANSFER_STOP : wait until SCLK is Low before deasserting CS
     // POST_CLOCKS   : provide eight clocks with CS High between commands
     // POST_STOP     : stop the post-command clock while SCLK is Low
-    // WAIT_READ     : accept a 64-byte read request after initialization
+    // WAIT_READ     : accept a 64-byte read or write request after initialization
     // READ_RESPONSE : hold the selected 64-byte result until accepted
     // DONE          : hold the interface idle until reset
     // -------------------------------------------------------------------------
 
     assign o_read_ready = state == WAIT_READ;
     assign read_request_fire = i_read_valid & o_read_ready;
+    assign o_write_ready = (state == WAIT_READ) & !i_read_valid;
+    assign write_request_fire = i_write_valid & o_write_ready;
     assign o_read_data_valid = state == READ_RESPONSE;
     assign o_read_data = read_data;
     assign read_response_fire = o_read_data_valid & i_read_data_ready;
@@ -399,18 +562,24 @@ module sd_card_ctrl #(
     assign command_update = o_result_event;
 
     assign next_command_available =
-        ((result == RESULT_OK) & (command != COMMAND_CMD17)) |
+        ((result == RESULT_OK)
+         & (command != COMMAND_CMD17)
+         & (command != COMMAND_CMD24)) |
         (result == RESULT_BUSY);
     assign read_response_available =
         (result == RESULT_OK) & (command == COMMAND_CMD17);
     assign retry_read_available =
         (result != RESULT_OK) & (command == COMMAND_CMD17);
+    assign write_done_available =
+        (command == COMMAND_CMD24);
     assign result_done_state = state_t'(
         (read_response_available ? READ_RESPONSE : '0) |
-        ((next_command_available | retry_read_available) ? POST_CLOCKS : '0) |
+        ((next_command_available | retry_read_available | write_done_available)
+         ? POST_CLOCKS : '0) |
         ((!read_response_available
           & !next_command_available
-          & !retry_read_available) ? DONE : '0)
+          & !retry_read_available
+          & !write_done_available) ? DONE : '0)
     );
 
     assign state_d = state_t'(
@@ -421,10 +590,10 @@ module sd_card_ctrl #(
         ((state == TRANSFER_STOP) ? (!o_sclk                             ? result_done_state : TRANSFER_STOP) : '0) |
         ((state == POST_CLOCKS  ) ? ((spi_sclk_count >= 10'd8)           ? POST_STOP     : POST_CLOCKS  ) : '0) |
         ((state == POST_STOP    ) ?
-            ((!o_sclk & (command == COMMAND_CMD17)) ? WAIT_READ : '0) |
-            ((!o_sclk & (command != COMMAND_CMD17)) ? LOAD_CMD  : '0) |
+            ((!o_sclk & ((command == COMMAND_CMD17) | (command == COMMAND_CMD24))) ? WAIT_READ : '0) |
+            ((!o_sclk & (command != COMMAND_CMD17) & (command != COMMAND_CMD24)) ? LOAD_CMD  : '0) |
             (o_sclk ? POST_STOP : '0) : '0) |
-        ((state == WAIT_READ    ) ? (read_request_fire                   ? LOAD_CMD      : WAIT_READ    ) : '0) |
+        ((state == WAIT_READ    ) ? ((read_request_fire | write_request_fire) ? LOAD_CMD : WAIT_READ) : '0) |
         ((state == READ_RESPONSE) ? (read_response_fire                  ? POST_CLOCKS   : READ_RESPONSE) : '0) |
         ((state == DONE         ) ? (DONE                                                               ) : '0)
     );
@@ -437,16 +606,24 @@ module sd_card_ctrl #(
         ((command == COMMAND_CMD55 ) ? COMMAND_ACMD41 : '0) |
         ((command == COMMAND_ACMD41) ? COMMAND_CMD58  : '0) |
         ((command == COMMAND_CMD58 ) ? COMMAND_CMD17  : '0) |
-        ((command == COMMAND_CMD17 ) ? COMMAND_CMD17  : '0)
+        ((command == COMMAND_CMD17 ) ? COMMAND_CMD17  : '0) |
+        ((command == COMMAND_CMD24 ) ? COMMAND_CMD24  : '0)
     );
 
     assign command_d = command_t'(
-        ((command_update && (result == RESULT_BUSY)) ?
+        ((state == WAIT_READ) && write_request_fire ?
+            COMMAND_CMD24 : '0) |
+        ((state == WAIT_READ) && read_request_fire ?
+            COMMAND_CMD17 : '0) |
+        ((state != WAIT_READ) && command_update && (result == RESULT_BUSY) ?
             COMMAND_CMD55 : '0) |
-        ((command_update && (result == RESULT_OK)) ?
+        ((state != WAIT_READ) && command_update && (result == RESULT_OK) ?
             command_after_ok : '0) |
-        ((!command_update
-          || ((result != RESULT_BUSY) && (result != RESULT_OK))) ?
+        ((state == WAIT_READ) && !write_request_fire && !read_request_fire ?
+            command : '0) |
+        ((state != WAIT_READ)
+          && (!command_update
+              || ((result != RESULT_BUSY) && (result != RESULT_OK))) ?
             command : '0)
     );
 
