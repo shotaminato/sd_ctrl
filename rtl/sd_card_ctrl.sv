@@ -239,10 +239,9 @@ module sd_card_ctrl #(
     // CMD8 and CMD58 collect four additional response bytes after R1.
     // -------------------------------------------------------------------------
 
-    assign response_capture = spi_rx_fire & r1_seen & response_needed;
-    assign response_complete =
-        response_capture & (response_index == 2'd3);
-    assign response_payload = {response_data[23:0], spi_rx_data};
+    assign response_capture  = spi_rx_fire & r1_seen & response_needed;
+    assign response_complete = response_capture & (response_index == 2'd3);
+    assign response_payload  = {response_data[23:0], spi_rx_data};
 
     // -------------------------------------------------------------------------
     // CMD17 data-block handling
@@ -326,25 +325,25 @@ module sd_card_ctrl #(
     // Response state and receive counters
     // -------------------------------------------------------------------------
 
-    assign r1_seen_d = (state != TRANSFER)
-                     ? 1'b0
-                     : (r1_valid ? 1'b1 : r1_seen);
+    assign r1_seen_d = (state == TRANSFER) & (r1_valid | r1_seen);
+    
     assign r1_byte_d = r1_valid ? spi_rx_data : r1_byte;
-    assign response_index_d = (state != TRANSFER)
-                            ? 2'd0
-                            : (response_capture
-                               ? (response_index + 2'd1)
-                               : response_index);
-    assign response_data_d = (state != TRANSFER)
-                           ? 32'd0
-                           : (response_capture
-                              ? {response_data[23:0], spi_rx_data}
-                              : response_data);
-    assign read_token_seen_d = (state != TRANSFER)
-                             ? 1'b0
-                             : (read_token_valid
-                                ? 1'b1
-                                : read_token_seen);
+    
+    assign response_index_d =
+        (state != TRANSFER)
+        ? 2'd0
+        : (response_capture ? (response_index + 2'd1) : response_index);
+    
+    assign response_data_d = 
+        (state != TRANSFER) 
+        ? 32'd0
+        : (response_capture ? {response_data[23:0], spi_rx_data} : response_data);
+    
+    assign read_token_seen_d = 
+        (state != TRANSFER)
+        ? 1'b0
+        : (read_token_valid ? 1'b1 : read_token_seen);
+
     assign read_token_wait_count_d =
         ((state != TRANSFER) | read_token_seen | read_token_valid)
         ? 16'd0
@@ -352,16 +351,15 @@ module sd_card_ctrl #(
             & (spi_rx_data == 8'hff))
            ? (read_token_wait_count + 16'd1)
            : read_token_wait_count);
+
     assign read_byte_count_d =
         (state != TRANSFER)
         ? 10'd0
-        : (read_data_capture
-           ? (read_byte_count + 10'd1)
-           : read_byte_count);
+        : (read_data_capture ? (read_byte_count + 10'd1) : read_byte_count);
+
     assign read_data_d =
-        (read_data_selected
-         ? {read_data[503:0], spi_rx_data} : '0)
-        | ((!read_data_selected & !read_request_fire) ? read_data : '0);
+        (( read_data_selected) ? {read_data[503:0], spi_rx_data} : '0) |
+        ((!read_data_selected & !read_request_fire) ? read_data : '0);
 
     `DFFR(r1_seen              , r1_seen_d              , 1'b1    , i_clk, i_rst_n)
     `DFFR(r1_byte              , r1_byte_d              , r1_valid, i_clk, i_rst_n)
