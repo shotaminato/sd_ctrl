@@ -1,7 +1,6 @@
 module sd_card_ctrl #(
     parameter int unsigned CLK_FREQ_HZ          = 50_000_000,
     parameter int unsigned SCLK_FREQ_HZ         = 500_000,
-    parameter int unsigned UART_BAUD_RATE       = 115200,
     parameter int unsigned ACMD41_MAX_ATTEMPTS  = 1000,
     parameter int unsigned READ_TOKEN_MAX_BYTES = 8192
 ) (
@@ -13,45 +12,19 @@ module sd_card_ctrl #(
     output logic o_mosi,
     input  logic i_miso,
 
-    output logic o_uart_tx
+    input  logic         i_read_valid,
+    input  logic [49:0]  i_read_address,
+    output logic         o_read_ready,
+    output logic         o_read_data_valid,
+    output logic [511:0] o_read_data,
+    input  logic         i_read_data_ready,
+
+    output logic [2:0] o_command,
+    output logic [2:0] o_result,
+    output logic       o_clock_event,
+    output logic       o_command_event,
+    output logic       o_result_event
 );
-
-    // -------------------------------------------------------------------------
-    // UART message constants
-    //
-    // Initialization progress and each command result are sent as ASCII
-    // strings. All messages are right-aligned to the same packed-vector width.
-    // -------------------------------------------------------------------------
-
-    localparam int unsigned UART_CLK_FREQ_MHZ = CLK_FREQ_HZ / 1_000_000;
-    localparam int unsigned MSG_MAX_BYTES = 16;
-
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CLOCK_OK       = "80CLK OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_TX        = "CMD0 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_TX        = "CMD8 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_TX       = "CMD55 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_TX      = "ACMD41 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_TX       = "CMD58 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_TX       = "CMD17 TX\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_OK        = "CMD0 OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_OK        = "CMD8 OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_OK       = "CMD55 OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_OK      = "ACMD41 OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_SD_INIT_OK     = "SD INIT OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_OK       = "CMD17 READ OK\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_BUSY    = "ACMD41 BUSY\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_ERROR     = "CMD0 R1 ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_ERROR     = "CMD8 R7 ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_ERROR    = "CMD55 R1 ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_ERROR   = "ACMD41 R1 ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_ERROR    = "CMD58 OCR ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_ERROR    = "CMD17 READ ERR\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD0_TIMEOUT   = "CMD0 TIMEOUT\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD8_TIMEOUT   = "CMD8 TIMEOUT\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD55_TIMEOUT  = "CMD55 TIMEOUT\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_ACMD41_TIMEOUT = "ACMD41 TIMEOUT\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD58_TIMEOUT  = "CMD58 TIMEOUT\r\n";
-    localparam logic [MSG_MAX_BYTES*8-1:0] MSG_CMD17_TIMEOUT  = "CMD17 TIMEOUT\r\n";
 
     // -------------------------------------------------------------------------
     // SD SPI command packets
@@ -62,7 +35,6 @@ module sd_card_ctrl #(
     localparam logic [47:0] CMD55_DATA  = 48'h77_00_00_00_00_01;
     localparam logic [47:0] ACMD41_DATA = 48'h69_40_00_00_00_01;
     localparam logic [47:0] CMD58_DATA  = 48'h7a_00_00_00_00_01;
-    localparam logic [31:0] DEFAULT_READ_ADDRESS = 32'h0000_0000;
 
     // -------------------------------------------------------------------------
     // Controller state and result encoding
@@ -74,15 +46,13 @@ module sd_card_ctrl #(
     typedef enum logic [3:0] {
         INIT_CLOCKS,
         INIT_STOP,
-        MSG_CLOCK,
         LOAD_CMD,
-        MSG_CMD,
         TRANSFER,
         TRANSFER_STOP,
-        MSG_RESULT,
         POST_CLOCKS,
         POST_STOP,
-        SEND_READ_DATA,
+        WAIT_READ,
+        READ_RESPONSE,
         DONE
     } state_t;
 
@@ -109,7 +79,6 @@ module sd_card_ctrl #(
     // Each cmd_index bit selects one of the six active-command bytes.
     // rx_index discards the six bytes received during transmission, then
     // counts R1 attempts.
-    // uart_index selects the next character of the active UART message.
     // -------------------------------------------------------------------------
 
     state_t state;
@@ -131,16 +100,15 @@ module sd_card_ctrl #(
     logic [5:0] cmd_index_d;
     logic [3:0] rx_index;
     logic [3:0] rx_index_d;
-    logic [3:0] uart_index;
-    logic [3:0] uart_index_d;
     logic [15:0] acmd41_attempt_count;
     logic [15:0] acmd41_attempt_count_d;
     logic [15:0] read_token_wait_count;
     logic [15:0] read_token_wait_count_d;
     logic [9:0] read_byte_count;
     logic [9:0] read_byte_count_d;
-    logic [9:0] uart_read_count;
-    logic [9:0] uart_read_count_d;
+    logic [49:0] read_request_address;
+    logic [511:0] read_data;
+    logic [511:0] read_data_d;
 
     // -------------------------------------------------------------------------
     // SPI controller interface
@@ -163,43 +131,6 @@ module sd_card_ctrl #(
     logic spi_rx_fire;
 
     // -------------------------------------------------------------------------
-    // CMD17 read-data FIFO
-    // -------------------------------------------------------------------------
-
-    logic [7:0] read_fifo_data;
-    logic read_fifo_write_valid;
-    logic read_fifo_write_ready;
-    logic read_fifo_valid;
-    logic read_fifo_ready;
-
-    // -------------------------------------------------------------------------
-    // UART transmitter interface and message selector
-    // -------------------------------------------------------------------------
-
-    logic uart_valid;
-    logic uart_ready;
-    logic uart_fire;
-    logic uart_read_active;
-    logic uart_read_fire;
-    logic uart_read_done;
-    logic uart_message_active;
-    logic [4:0] uart_message_length;
-    logic [MSG_MAX_BYTES*8-1:0] uart_message;
-    logic [MSG_MAX_BYTES*8-1:0] uart_command_message;
-    logic [MSG_MAX_BYTES*8-1:0] uart_result_ok_message;
-    logic [MSG_MAX_BYTES*8-1:0] uart_result_error_message;
-    logic [MSG_MAX_BYTES*8-1:0] uart_result_timeout_message;
-    logic [MSG_MAX_BYTES*8-1:0] uart_selected_result_message;
-    logic [4:0] uart_byte_number;
-    logic [4:0] uart_command_message_length;
-    logic [4:0] uart_result_ok_message_length;
-    logic [4:0] uart_result_error_message_length;
-    logic [4:0] uart_result_timeout_message_length;
-    logic [4:0] uart_selected_result_message_length;
-    logic [7:0] uart_data;
-    logic uart_message_done;
-
-    // -------------------------------------------------------------------------
     // R1 response detection
     // -------------------------------------------------------------------------
 
@@ -219,7 +150,8 @@ module sd_card_ctrl #(
     logic [31:0] response_payload;
     logic transfer_done;
     logic next_command_available;
-    logic send_read_data_available;
+    logic read_response_available;
+    logic retry_read_available;
     logic acmd41_last_attempt;
     logic read_token_seen;
     logic read_token_seen_d;
@@ -227,8 +159,12 @@ module sd_card_ctrl #(
     logic read_token_error;
     logic read_token_timeout;
     logic read_data_capture;
+    logic read_data_selected;
     logic read_block_complete;
     logic cmd17_r1_error;
+    logic read_request_fire;
+    logic read_response_fire;
+    logic command_update;
 
     // -------------------------------------------------------------------------
     // SPI enable control
@@ -256,10 +192,10 @@ module sd_card_ctrl #(
     // disabled after CMD0, so the remaining commands use an end-bit-only CRC.
     // -------------------------------------------------------------------------
 
-    // read_address is fixed for the initial autonomous read. A future external
-    // request interface can replace this assignment with a request-latched
-    // address without changing the command serializer.
-    assign read_address = DEFAULT_READ_ADDRESS;
+    // The request address represents physical address bits [55:6].
+    // Bits [34:3] are the SDHC 512-byte block address, and bits [2:0]
+    // select one of the eight 64-byte regions returned by CMD17.
+    assign read_address = read_request_address[34:3];
     assign cmd17_data = {8'h51, read_address, 8'h01};
 
     assign command_data =
@@ -329,11 +265,12 @@ module sd_card_ctrl #(
         & (read_token_wait_count >= (READ_TOKEN_MAX_BYTES - 1));
     assign read_data_capture =
         spi_rx_fire & (command == COMMAND_CMD17) & read_token_seen;
+    assign read_data_selected =
+        read_data_capture
+        & (read_byte_count < 10'd512)
+        & (read_byte_count[8:6] == read_request_address[2:0]);
     assign read_block_complete =
         read_data_capture & (read_byte_count == 10'd513);
-    assign read_fifo_write_valid =
-        read_data_capture & (read_byte_count < 10'd512)
-        & read_fifo_write_ready;
 
     // -------------------------------------------------------------------------
     // Transfer completion and command result decoding
@@ -421,6 +358,10 @@ module sd_card_ctrl #(
         : (read_data_capture
            ? (read_byte_count + 10'd1)
            : read_byte_count);
+    assign read_data_d =
+        (read_data_selected
+         ? {read_data[503:0], spi_rx_data} : '0)
+        | ((!read_data_selected & !read_request_fire) ? read_data : '0);
 
     `DFFR(r1_seen              , r1_seen_d              , 1'b1    , i_clk, i_rst_n)
     `DFFR(r1_byte              , r1_byte_d              , r1_valid, i_clk, i_rst_n)
@@ -429,163 +370,64 @@ module sd_card_ctrl #(
     `DFFR(read_token_seen      , read_token_seen_d      , 1'b1    , i_clk, i_rst_n)
     `DFFR(read_token_wait_count, read_token_wait_count_d, 1'b1    , i_clk, i_rst_n)
     `DFFR(read_byte_count      , read_byte_count_d      , 1'b1    , i_clk, i_rst_n)
-
-    // -------------------------------------------------------------------------
-    // UART message output
-    //
-    // The current state/result selects a packed message and its length.
-    // Characters advance only on the uart_valid/uart_ready handshake.
-    // -------------------------------------------------------------------------
-
-    assign uart_message_active =
-        (state == MSG_CLOCK ) |
-        (state == MSG_CMD   ) |
-        (state == MSG_RESULT);
-
-    assign uart_command_message =
-        ((command == COMMAND_CMD0  ) ? MSG_CMD0_TX   : '0) |
-        ((command == COMMAND_CMD8  ) ? MSG_CMD8_TX   : '0) |
-        ((command == COMMAND_CMD55 ) ? MSG_CMD55_TX  : '0) |
-        ((command == COMMAND_ACMD41) ? MSG_ACMD41_TX : '0) |
-        ((command == COMMAND_CMD58 ) ? MSG_CMD58_TX  : '0) |
-        ((command == COMMAND_CMD17 ) ? MSG_CMD17_TX  : '0);
-
-    assign uart_command_message_length =
-        ((command == COMMAND_CMD0  ) ? 5'd9  : '0) |
-        ((command == COMMAND_CMD8  ) ? 5'd9  : '0) |
-        ((command == COMMAND_CMD55 ) ? 5'd10 : '0) |
-        ((command == COMMAND_ACMD41) ? 5'd11 : '0) |
-        ((command == COMMAND_CMD58 ) ? 5'd10 : '0) |
-        ((command == COMMAND_CMD17 ) ? 5'd10 : '0);
-
-    assign uart_result_ok_message =
-        ((command == COMMAND_CMD0  ) ? MSG_CMD0_OK    : '0) |
-        ((command == COMMAND_CMD8  ) ? MSG_CMD8_OK    : '0) |
-        ((command == COMMAND_CMD55 ) ? MSG_CMD55_OK   : '0) |
-        ((command == COMMAND_ACMD41) ? MSG_ACMD41_OK  : '0) |
-        ((command == COMMAND_CMD58 ) ? MSG_SD_INIT_OK : '0) |
-        ((command == COMMAND_CMD17 ) ? MSG_CMD17_OK   : '0);
-
-    assign uart_result_ok_message_length =
-        ((command == COMMAND_CMD0  ) ? 5'd9  : '0) |
-        ((command == COMMAND_CMD8  ) ? 5'd9  : '0) |
-        ((command == COMMAND_CMD55 ) ? 5'd10 : '0) |
-        ((command == COMMAND_ACMD41) ? 5'd11 : '0) |
-        ((command == COMMAND_CMD58 ) ? 5'd12 : '0) |
-        ((command == COMMAND_CMD17 ) ? 5'd15 : '0);
-
-    assign uart_result_error_message =
-        ((command == COMMAND_CMD0  ) ? MSG_CMD0_ERROR   : '0) |
-        ((command == COMMAND_CMD8  ) ? MSG_CMD8_ERROR   : '0) |
-        ((command == COMMAND_CMD55 ) ? MSG_CMD55_ERROR  : '0) |
-        ((command == COMMAND_ACMD41) ? MSG_ACMD41_ERROR : '0) |
-        ((command == COMMAND_CMD58 ) ? MSG_CMD58_ERROR  : '0) |
-        ((command == COMMAND_CMD17 ) ? MSG_CMD17_ERROR  : '0);
-
-    assign uart_result_error_message_length =
-        ((command == COMMAND_CMD0  ) ? 5'd13 : '0) |
-        ((command == COMMAND_CMD8  ) ? 5'd13 : '0) |
-        ((command == COMMAND_CMD55 ) ? 5'd14 : '0) |
-        ((command == COMMAND_ACMD41) ? 5'd15 : '0) |
-        ((command == COMMAND_CMD58 ) ? 5'd15 : '0) |
-        ((command == COMMAND_CMD17 ) ? 5'd16 : '0);
-
-    assign uart_result_timeout_message =
-        ((command == COMMAND_CMD0  ) ? MSG_CMD0_TIMEOUT   : '0) |
-        ((command == COMMAND_CMD8  ) ? MSG_CMD8_TIMEOUT   : '0) |
-        ((command == COMMAND_CMD55 ) ? MSG_CMD55_TIMEOUT  : '0) |
-        ((command == COMMAND_ACMD41) ? MSG_ACMD41_TIMEOUT : '0) |
-        ((command == COMMAND_CMD58 ) ? MSG_CMD58_TIMEOUT  : '0) |
-        ((command == COMMAND_CMD17 ) ? MSG_CMD17_TIMEOUT  : '0);
-
-    assign uart_result_timeout_message_length =
-        ((command == COMMAND_CMD0  ) ? 5'd14 : '0) |
-        ((command == COMMAND_CMD8  ) ? 5'd14 : '0) |
-        ((command == COMMAND_CMD55 ) ? 5'd15 : '0) |
-        ((command == COMMAND_ACMD41) ? 5'd16 : '0) |
-        ((command == COMMAND_CMD58 ) ? 5'd15 : '0) |
-        ((command == COMMAND_CMD17 ) ? 5'd15 : '0);
-
-    assign uart_selected_result_message =
-        ((result == RESULT_OK     ) ? uart_result_ok_message      : '0) |
-        ((result == RESULT_BUSY   ) ? MSG_ACMD41_BUSY             : '0) |
-        ((result == RESULT_ERROR  ) ? uart_result_error_message   : '0) |
-        ((result == RESULT_TIMEOUT) ? uart_result_timeout_message : '0);
-
-    assign uart_selected_result_message_length =
-        ((result == RESULT_OK     ) ? uart_result_ok_message_length      : '0) |
-        ((result == RESULT_BUSY   ) ? 5'd13                              : '0) |
-        ((result == RESULT_ERROR  ) ? uart_result_error_message_length   : '0) |
-        ((result == RESULT_TIMEOUT) ? uart_result_timeout_message_length : '0);
-
-    assign uart_message =
-        ((state == MSG_CLOCK ) ? MSG_CLOCK_OK                : '0) |
-        ((state == MSG_CMD   ) ? uart_command_message        : '0) |
-        ((state == MSG_RESULT) ? uart_selected_result_message : '0);
-
-    assign uart_message_length =
-        ((state == MSG_CLOCK ) ? 5'd10                               : '0) |
-        ((state == MSG_CMD   ) ? uart_command_message_length         : '0) |
-        ((state == MSG_RESULT) ? uart_selected_result_message_length : '0);
-
-    assign uart_byte_number = uart_message_active
-                            ? (uart_message_length - 5'd1 - {1'b0, uart_index})
-                            : 5'd0;
-    assign uart_read_active = state == SEND_READ_DATA;
-    assign read_fifo_ready = uart_read_active & uart_ready;
-    assign uart_read_fire = read_fifo_valid & read_fifo_ready;
-    assign uart_read_done =
-        uart_read_fire & (uart_read_count == 10'd511);
-    assign uart_data =
-        (uart_message_active
-         ? uart_message[uart_byte_number*8 +: 8] : '0) |
-        ((uart_read_active & read_fifo_valid) ? read_fifo_data : '0);
-    assign uart_valid =
-        uart_message_active | (uart_read_active & read_fifo_valid);
-    assign uart_fire = uart_message_active & uart_ready;
-    assign uart_message_done = uart_fire
-                             & ({1'b0, uart_index} == (uart_message_length - 5'd1));
+    `DFFR(read_request_address , i_read_address         , read_request_fire, i_clk, i_rst_n)
+    `DFFR(read_data            , read_data_d            , 1'b1    , i_clk, i_rst_n)
 
     // -------------------------------------------------------------------------
     // Initialization state machine
     //
     // INIT_CLOCKS   : generate at least 80 clocks while CS is High
     // INIT_STOP     : wait until SCLK is Low before stopping it
-    // MSG_CLOCK     : report completion of the initial clocks
     // LOAD_CMD      : enqueue all six active-command bytes before asserting CS
-    // MSG_CMD       : report that the active command is ready to transmit
     // TRANSFER      : transmit the active command and receive its response
     // TRANSFER_STOP : wait until SCLK is Low before deasserting CS
-    // MSG_RESULT    : report success, busy, an error, or a timeout
     // POST_CLOCKS   : provide eight clocks with CS High between commands
     // POST_STOP     : stop the post-command clock while SCLK is Low
-    // SEND_READ_DATA: send the 512-byte CMD17 payload over UART
+    // WAIT_READ     : accept a 64-byte read request after initialization
+    // READ_RESPONSE : hold the selected 64-byte result until accepted
     // DONE          : hold the interface idle until reset
     // -------------------------------------------------------------------------
+
+    assign o_read_ready = state == WAIT_READ;
+    assign read_request_fire = i_read_valid & o_read_ready;
+    assign o_read_data_valid = state == READ_RESPONSE;
+    assign o_read_data = read_data;
+    assign read_response_fire = o_read_data_valid & i_read_data_ready;
+    assign o_command = command;
+    assign o_result = result;
+    assign o_clock_event = (state == INIT_STOP) & !o_sclk;
+    assign o_command_event = (state == LOAD_CMD) & spi_tx_fire & cmd_index[5];
+    assign o_result_event = (state == TRANSFER_STOP) & !o_sclk;
+    assign command_update = o_result_event;
 
     assign next_command_available =
         ((result == RESULT_OK) & (command != COMMAND_CMD17)) |
         (result == RESULT_BUSY);
-    assign send_read_data_available =
+    assign read_response_available =
         (result == RESULT_OK) & (command == COMMAND_CMD17);
+    assign retry_read_available =
+        (result != RESULT_OK) & (command == COMMAND_CMD17);
     assign result_done_state = state_t'(
-        (send_read_data_available ? SEND_READ_DATA : '0) |
-        (next_command_available ? POST_CLOCKS : '0) |
-        ((!send_read_data_available & !next_command_available) ? DONE : '0)
+        (read_response_available ? READ_RESPONSE : '0) |
+        ((next_command_available | retry_read_available) ? POST_CLOCKS : '0) |
+        ((!read_response_available
+          & !next_command_available
+          & !retry_read_available) ? DONE : '0)
     );
 
     assign state_d = state_t'(
         ((state == INIT_CLOCKS  ) ? ((spi_sclk_count >= 10'd80)          ? INIT_STOP     : INIT_CLOCKS  ) : '0) |
-        ((state == INIT_STOP    ) ? (!o_sclk                             ? MSG_CLOCK     : INIT_STOP    ) : '0) |
-        ((state == MSG_CLOCK    ) ? (uart_message_done                   ? LOAD_CMD      : MSG_CLOCK    ) : '0) |
-        ((state == LOAD_CMD     ) ? ((spi_tx_fire & cmd_index[5])        ? MSG_CMD       : LOAD_CMD     ) : '0) |
-        ((state == MSG_CMD      ) ? (uart_message_done                   ? TRANSFER      : MSG_CMD      ) : '0) |
+        ((state == INIT_STOP    ) ? (!o_sclk                             ? LOAD_CMD      : INIT_STOP    ) : '0) |
+        ((state == LOAD_CMD     ) ? ((spi_tx_fire & cmd_index[5])        ? TRANSFER      : LOAD_CMD     ) : '0) |
         ((state == TRANSFER     ) ? (transfer_done                       ? TRANSFER_STOP : TRANSFER     ) : '0) |
-        ((state == TRANSFER_STOP) ? (!o_sclk                             ? MSG_RESULT    : TRANSFER_STOP) : '0) |
-        ((state == MSG_RESULT   ) ? (uart_message_done                   ? result_done_state : MSG_RESULT) : '0) |
+        ((state == TRANSFER_STOP) ? (!o_sclk                             ? result_done_state : TRANSFER_STOP) : '0) |
         ((state == POST_CLOCKS  ) ? ((spi_sclk_count >= 10'd8)           ? POST_STOP     : POST_CLOCKS  ) : '0) |
-        ((state == POST_STOP    ) ? (!o_sclk                             ? LOAD_CMD      : POST_STOP    ) : '0) |
-        ((state == SEND_READ_DATA) ? (uart_read_done                     ? DONE          : SEND_READ_DATA) : '0) |
+        ((state == POST_STOP    ) ?
+            ((!o_sclk & (command == COMMAND_CMD17)) ? WAIT_READ : '0) |
+            ((!o_sclk & (command != COMMAND_CMD17)) ? LOAD_CMD  : '0) |
+            (o_sclk ? POST_STOP : '0) : '0) |
+        ((state == WAIT_READ    ) ? (read_request_fire                   ? LOAD_CMD      : WAIT_READ    ) : '0) |
+        ((state == READ_RESPONSE) ? (read_response_fire                  ? POST_CLOCKS   : READ_RESPONSE) : '0) |
         ((state == DONE         ) ? (DONE                                                               ) : '0)
     );
 
@@ -601,14 +443,12 @@ module sd_card_ctrl #(
     );
 
     assign command_d = command_t'(
-        (((state == MSG_RESULT) && uart_message_done
-          && (result == RESULT_BUSY)) ?
+        ((command_update && (result == RESULT_BUSY)) ?
             COMMAND_CMD55 : '0) |
-        (((state == MSG_RESULT) && uart_message_done
-          && (result == RESULT_OK)) ?
+        ((command_update && (result == RESULT_OK)) ?
             command_after_ok : '0) |
-        ((!((state == MSG_RESULT) && uart_message_done
-            && ((result == RESULT_BUSY) || (result == RESULT_OK)))) ?
+        ((!command_update
+          || ((result != RESULT_BUSY) && (result != RESULT_OK))) ?
             command : '0)
     );
 
@@ -618,7 +458,7 @@ module sd_card_ctrl #(
     // Index next-state logic
     //
     // Each index resets outside its owning phase so a reset or phase change
-    // cannot leave a stale command, receive, or message position.
+    // cannot leave a stale command or receive position.
     // -------------------------------------------------------------------------
 
     assign cmd_index_d = (state != LOAD_CMD)
@@ -627,16 +467,6 @@ module sd_card_ctrl #(
     assign rx_index_d = (state != TRANSFER)
                       ? '0
                       : (spi_rx_fire ? (rx_index + 4'd1) : rx_index);
-    assign uart_index_d = !uart_message_active
-                        ? '0
-                        : (uart_fire
-                           ? (uart_message_done ? 4'd0 : (uart_index + 4'd1))
-                           : uart_index);
-    assign uart_read_count_d = !uart_read_active
-                             ? 10'd0
-                             : (uart_read_fire
-                                ? (uart_read_count + 10'd1)
-                                : uart_read_count);
     assign acmd41_attempt_count_d =
         (transfer_done && (command == COMMAND_ACMD41))
         ? (acmd41_attempt_count + 16'd1)
@@ -644,27 +474,7 @@ module sd_card_ctrl #(
 
     `DFFR_VAL(cmd_index, cmd_index_d, 1'b1, i_clk, i_rst_n, 6'b00_0001)
     `DFFR(rx_index  , rx_index_d  , 1'b1, i_clk, i_rst_n)
-    `DFFR(uart_index, uart_index_d, 1'b1, i_clk, i_rst_n)
-    `DFFR(uart_read_count, uart_read_count_d, 1'b1, i_clk, i_rst_n)
     `DFFR(acmd41_attempt_count, acmd41_attempt_count_d, 1'b1, i_clk, i_rst_n)
-
-    // -------------------------------------------------------------------------
-    // CMD17 read-data FIFO instance
-    // -------------------------------------------------------------------------
-
-    fifo #(
-        .WIDTH (8),
-        .DEPTH (512)
-    ) u_read_fifo (
-        .i_clk    (i_clk),
-        .i_rst_n  (i_rst_n),
-        .i_wvalid (read_fifo_write_valid),
-        .o_wready (read_fifo_write_ready),
-        .i_wdata  (spi_rx_data),
-        .o_rvalid (read_fifo_valid),
-        .i_rready (read_fifo_ready),
-        .o_rdata  (read_fifo_data)
-    );
 
     // -------------------------------------------------------------------------
     // SPI controller instance
@@ -693,25 +503,6 @@ module sd_card_ctrl #(
         .o_rx_valid    (spi_rx_valid),
         .i_rx_ready    (spi_rx_ready),
         .o_rx_overflow (spi_rx_overflow)
-    );
-
-    // -------------------------------------------------------------------------
-    // UART transmitter instance
-    //
-    // uart_tx serializes each selected status character and provides FIFO
-    // backpressure through uart_ready.
-    // -------------------------------------------------------------------------
-
-    uart_tx #(
-        .BAUD_RATE   (UART_BAUD_RATE),
-        .CLK_FREQ_MHZ(UART_CLK_FREQ_MHZ)
-    ) u_uart_tx (
-        .i_clk   (i_clk),
-        .i_rst_n (i_rst_n),
-        .o_tx    (o_uart_tx),
-        .i_wdata (uart_data),
-        .i_wvalid(uart_valid),
-        .o_wready(uart_ready)
     );
 
 endmodule

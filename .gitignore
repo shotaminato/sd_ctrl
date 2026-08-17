@@ -9,6 +9,6 @@ quartus/incremental_db
 quartus/simulation
 quartus/output_files
 quartus/c5_pin_model_dump.txt
-quartus/sd_card_ctrl.qws
+quartus/sd_card_ctrl_top.qws
 
 tb/scripts/*.bin

@@ -12,6 +12,8 @@ module sd_card_ctrl_tb;
     localparam int RESPONSE_OK = 0;
     localparam int RESPONSE_R1_ERROR = 1;
     localparam int RESPONSE_TIMEOUT = 2;
+    localparam logic [47:0] CMD17_PACKET = 48'h51_00000001_01;
+    localparam int READ_CHUNK = 3;
 
     logic i_clk;
     logic i_rst_n;
@@ -19,9 +21,10 @@ module sd_card_ctrl_tb;
     logic o_sclk;
     logic o_mosi;
     logic i_miso;
+    logic [9:0] i_addr;
     logic o_uart_tx;
 
-    sd_card_ctrl #(
+    sd_card_ctrl_top #(
         .CLK_FREQ_HZ         (CLK_FREQ_HZ),
         .SCLK_FREQ_HZ        (SCLK_FREQ_HZ),
         .UART_BAUD_RATE      (UART_BAUD_RATE),
@@ -34,6 +37,7 @@ module sd_card_ctrl_tb;
         .o_sclk   (o_sclk),
         .o_mosi   (o_mosi),
         .i_miso   (i_miso),
+        .i_addr   (i_addr),
         .o_uart_tx(o_uart_tx)
     );
 
@@ -98,12 +102,14 @@ module sd_card_ctrl_tb;
     task automatic expect_uart_read_data;
         logic [7:0] received;
 
-        for (int byte_index = 0; byte_index < 512; byte_index++) begin
+        for (int byte_index = 0; byte_index < 64; byte_index++) begin
             receive_uart_byte(received);
-            if (received !== byte_index[7:0]) begin
+            if (received !== 8'(READ_CHUNK * 64 + byte_index)) begin
                 $fatal(1,
                        "UART read data mismatch at byte %0d: expected 0x%02x, got 0x%02x",
-                       byte_index, byte_index[7:0], received);
+                       byte_index,
+                       8'(READ_CHUNK * 64 + byte_index),
+                       received);
             end
         end
     endtask
@@ -181,14 +187,11 @@ module sd_card_ctrl_tb;
     endtask
 
     task automatic exchange_read_block;
-        logic [47:0] cmd17_packet;
-
-        cmd17_packet = 48'h510000000001;
-        wait_for_next_command();
+        @(negedge o_cs_n);
 
         for (int byte_index = 0; byte_index < 6; byte_index++) begin
             exchange_byte(
-                cmd17_packet[47-(byte_index*8) -: 8],
+                CMD17_PACKET[47-(byte_index*8) -: 8],
                 8'hff,
                 byte_index == 0
             );
@@ -265,11 +268,13 @@ module sd_card_ctrl_tb;
     task automatic apply_reset;
         i_rst_n = 1'b0;
         i_miso = 1'b1;
+        i_addr = 10'd11;
         repeat (5) @(posedge i_clk);
 
         if ((o_cs_n !== 1'b1)
             | (o_sclk !== 1'b0)
             | (o_mosi !== 1'b1)
+            | (dut.u_sd_card_ctrl.o_read_ready !== 1'b0)
             | (o_uart_tx !== 1'b1)) begin
             $fatal(1, "Reset outputs are incorrect");
         end
@@ -303,6 +308,9 @@ module sd_card_ctrl_tb;
         join
 
         check_idle();
+        if (dut.u_sd_card_ctrl.o_read_ready !== 1'b0) begin
+            $fatal(1, "Read request became ready after initialization failure");
+        end
     endtask
 
     initial begin
@@ -313,6 +321,7 @@ module sd_card_ctrl_tb;
     initial begin
         i_rst_n = 1'b0;
         i_miso = 1'b1;
+        i_addr = 10'd11;
 
         apply_reset();
         fork

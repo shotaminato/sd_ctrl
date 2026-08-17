@@ -1,12 +1,12 @@
 # -------------------------------------------------------------------------- #
 #
 # Copyright (C) 2023  Intel Corporation. All rights reserved.
-# Your use of Intel Corporation's design tools, logic functions 
-# and other software and tools, and any partner logic 
-# functions, and any output files from any of the foregoing 
-# (including device programming or simulation files), and any 
-# associated documentation or information are expressly subject 
-# to the terms and conditions of the Intel Program License 
+# Your use of Intel Corporation's design tools, logic functions
+# and other software and tools, and any partner logic
+# functions, and any output files from any of the foregoing
+# (including device programming or simulation files), and any
+# associated documentation or information are expressly subject
+# to the terms and conditions of the Intel Program License
 # Subscription Agreement, the Intel Quartus Prime License Agreement,
 # the Intel FPGA IP License Agreement, or other applicable license
 # agreement, including, without limitation, that your use is for
@@ -26,7 +26,7 @@
 # Notes:
 #
 # 1) The default values for assignments are stored in the file:
-#		sd_card_ctrl_assignment_defaults.qdf
+#		sd_card_ctrl_top_assignment_defaults.qdf
 #    If this file doesn't exist, see file:
 #		assignment_defaults.qdf
 #
@@ -39,7 +39,7 @@
 
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CEBA4F23C7
-set_global_assignment -name TOP_LEVEL_ENTITY sd_card_ctrl
+set_global_assignment -name TOP_LEVEL_ENTITY sd_card_ctrl_top
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 23.1STD.0
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "17:00:40  AUGUST 15, 2026"
 set_global_assignment -name LAST_QUARTUS_VERSION "23.1std.0 Lite Edition"
@@ -66,6 +66,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../deps/uart/rtl/uart_tx.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../deps/uart/rtl/uart_rx.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../deps/spi/rtl/spi_ctrl.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/sd_card_ctrl.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/uart_tx_top.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/sd_card_ctrl_top.sv
 set_location_assignment PIN_M9 -to i_clk
 set_location_assignment PIN_H11 -to o_sclk
 set_location_assignment PIN_K9 -to i_miso
@@ -73,4 +75,14 @@ set_location_assignment PIN_C11 -to o_cs_n
 set_location_assignment PIN_B11 -to o_mosi
 set_location_assignment PIN_P22 -to i_rst_n
 set_location_assignment PIN_C16 -to o_uart_tx
+set_location_assignment PIN_U13 -to i_addr[0]
+set_location_assignment PIN_V13 -to i_addr[1]
+set_location_assignment PIN_T13 -to i_addr[2]
+set_location_assignment PIN_T12 -to i_addr[3]
+set_location_assignment PIN_AA15 -to i_addr[4]
+set_location_assignment PIN_AB15 -to i_addr[5]
+set_location_assignment PIN_AA14 -to i_addr[6]
+set_location_assignment PIN_AA13 -to i_addr[7]
+set_location_assignment PIN_AB13 -to i_addr[8]
+set_location_assignment PIN_AB12 -to i_addr[9]
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

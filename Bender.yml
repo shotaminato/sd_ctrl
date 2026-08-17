@@ -13,6 +13,8 @@ dependencies:
 
 sources:
   - rtl/sd_card_ctrl.sv
+  - rtl/uart_tx_top.sv
+  - rtl/sd_card_ctrl_top.sv
   - target: test
     files:
       - tb/sd_card_ctrl_tb.sv

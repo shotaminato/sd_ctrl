@@ -6,8 +6,8 @@ derive_clock_uncertainty
 # 50 MHz / 100 = 500 kHz. Keep this ratio synchronized with SCLK_FREQ_HZ.
 # Define the clock first at the fabric register Q, then forward it through the
 # output buffer so TimeQuest includes both clock-generation and pin delays.
-create_generated_clock -name sd_sclk_int -source [get_pins {spi_ctrl:u_spi_ctrl|o_sclk|clk}] -divide_by 100 [get_pins {spi_ctrl:u_spi_ctrl|o_sclk|q}]
-create_generated_clock -name sd_sclk     -source [get_pins {spi_ctrl:u_spi_ctrl|o_sclk|q}] [get_ports {o_sclk}]
+create_generated_clock -name sd_sclk_int -source [get_pins {sd_card_ctrl:u_sd_card_ctrl|spi_ctrl:u_spi_ctrl|o_sclk|clk}] -divide_by 100 [get_pins {sd_card_ctrl:u_sd_card_ctrl|spi_ctrl:u_spi_ctrl|o_sclk|q}]
+create_generated_clock -name sd_sclk     -source [get_pins {sd_card_ctrl:u_sd_card_ctrl|spi_ctrl:u_spi_ctrl|o_sclk|q}] [get_ports {o_sclk}]
 
 # Conservative SD SPI timing budget (Mode 0):
 #   card input setup/hold: 5 ns
@@ -26,6 +26,7 @@ set_input_delay -clock [get_clocks {sd_sclk}] -clock_fall -min -1.000 [get_ports
 
 # External asynchronous reset enters dedicated reset logic.
 set_false_path -from [get_ports {i_rst_n}]
+set_false_path -from [get_ports {i_addr[*]}]
 
 # UART TX has no shared external timing reference; its baud timing is
 # generated and verified inside the i_clk domain.
